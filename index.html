@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Will Bun Become the New Shell?</title>
+<meta name="description" content="Anthropic acquired Bun three weeks after publishing a blog post about replacing MCP tool calls with TypeScript execution. Here's why that matters for how agents work.">
+<meta property="og:title" content="Will Bun Become the New Shell?">
+<meta property="og:description" content="Anthropic acquired Bun three weeks after publishing a blog post about replacing MCP tool calls with TypeScript execution. Here's why that matters for how agents work.">
+<meta property="og:type" content="article">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root,[data-theme="light"]{
+    --bg:#FAF9F6;--border:#DDD9D1;
+    --text:#1F1F1F;--text2:#3A3A3A;--muted:#7A7670;
+    --accent:#C2410C;--accent-bg:rgba(194,65,12,.06);--accent-bdr:rgba(194,65,12,.2);
+    --quote-bg:#F2F0EC;--code-bg:#EDEAE4;--code-bdr:#DDD9D1;
+    --head:#0F0F0F;
+    --hl-bg:rgba(194,65,12,.05);--hl-bdr:rgba(194,65,12,.15);
+    --tog-bg:#E8E5DE;--tog-fg:#7A7670;
+    --sk:#7C3AED;--ss:#15803D;--sc:#9CA3AF;--sf:#C2410C;--sn:#1D4ED8;--sp:#1F1F1F;
+    --tbl-head:#F2F0EC;--tbl-alt:#F8F7F4;--tbl-bdr:#DDD9D1;
+    --green:#15803D;--red:#B91C1C;--yellow:#A16207;
+  }
+  [data-theme="dark"]{
+    --bg:#111113;--border:#2C2C30;
+    --text:#CDCBC7;--text2:#A8A6A0;--muted:#7A7874;
+    --accent:#F97316;--accent-bg:rgba(249,115,22,.08);--accent-bdr:rgba(249,115,22,.2);
+    --quote-bg:#1A1A1D;--code-bg:#17171A;--code-bdr:#2C2C30;
+    --head:#F0EFEC;
+    --hl-bg:rgba(249,115,22,.06);--hl-bdr:rgba(249,115,22,.15);
+    --tog-bg:#2C2C30;--tog-fg:#CDCBC7;
+    --sk:#A78BFA;--ss:#4ADE80;--sc:#6B7280;--sf:#F97316;--sn:#60A5FA;--sp:#CDCBC7;
+    --tbl-head:#1E1E22;--tbl-alt:#161618;--tbl-bdr:#2C2C30;
+    --green:#4ADE80;--red:#F87171;--yellow:#FBBF24;
+  }
+
+  *{margin:0;padding:0;box-sizing:border-box}
+
+  body{
+    background:var(--bg);color:var(--text);
+    font-family:'Outfit',system-ui,sans-serif;
+    font-size:17.5px;line-height:1.78;
+    -webkit-font-smoothing:antialiased;
+    transition:background .35s,color .35s;
+  }
+
+  .tgl{
+    position:fixed;top:24px;right:24px;z-index:100;
+    width:44px;height:44px;border-radius:12px;
+    background:var(--tog-bg);border:1px solid var(--border);
+    cursor:pointer;display:flex;align-items:center;justify-content:center;
+    font-size:18px;color:var(--tog-fg);
+    transition:all .3s;backdrop-filter:blur(8px);
+  }
+  .tgl:hover{border-color:var(--accent);transform:scale(1.05)}
+  [data-theme="light"] .il{display:none}
+  [data-theme="dark"] .id{display:none}
+
+  .hdr{max-width:740px;margin:0 auto;padding:56px 28px 0}
+  .hdr .tag{
+    display:inline-block;
+    font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--accent);
+    background:var(--accent-bg);border:1px solid var(--accent-bdr);
+    padding:5px 14px;border-radius:100px;margin-bottom:32px;
+    animation:fadeUp .6s ease both;
+  }
+  h1{
+    font-family:'Instrument Serif',Georgia,serif;
+    font-size:clamp(40px,6vw,58px);font-weight:400;
+    line-height:1.1;letter-spacing:-.02em;
+    color:var(--head);margin-bottom:24px;
+    animation:fadeUp .6s ease .1s both;
+  }
+  h1 em{font-style:italic;color:var(--accent)}
+  .sub{
+    font-size:19px;color:var(--muted);line-height:1.55;max-width:620px;
+    animation:fadeUp .6s ease .2s both;
+  }
+  .meta{
+    font-size:14px;color:var(--muted);
+    margin-top:36px;padding:20px 0;
+    border-top:1px solid var(--border);border-bottom:1px solid var(--border);
+    display:flex;gap:8px;align-items:center;
+    animation:fadeUp .6s ease .3s both;
+  }
+  .meta .dot{opacity:.4}
+
+  .ct{max-width:740px;margin:0 auto;padding:8px 28px 48px}
+  .ct p{margin-bottom:22px}
+  .ct>p:first-child{animation:fadeUp .6s ease .4s both}
+
+  h2{
+    font-family:'Instrument Serif',Georgia,serif;
+    font-size:30px;font-weight:400;font-style:italic;
+    color:var(--head);
+    margin-top:64px;margin-bottom:24px;padding-top:32px;
+    border-top:1px solid var(--border);
+  }
+  .ct>h2:first-child{margin-top:32px;padding-top:0;border-top:none}
+  h2 span{
+    display:block;font-family:'Outfit',sans-serif;
+    font-size:11px;font-weight:600;font-style:normal;
+    letter-spacing:.12em;text-transform:uppercase;
+    color:var(--accent);margin-bottom:8px;
+  }
+
+  strong{color:var(--head);font-weight:600}
+
+  blockquote{
+    background:var(--quote-bg);border-left:3px solid var(--accent);
+    padding:20px 24px;margin:28px 0;border-radius:0 8px 8px 0;
+    font-family:'Instrument Serif',Georgia,serif;
+    font-size:19px;font-style:italic;color:var(--text2);line-height:1.6;
+  }
+  blockquote .at{
+    display:block;font-family:'Outfit',sans-serif;
+    font-size:13px;font-style:normal;color:var(--muted);margin-top:12px;
+  }
+
+  code{
+    font-family:'JetBrains Mono',monospace;font-size:.82em;
+    background:var(--code-bg);padding:2px 7px;border-radius:4px;color:var(--accent);
+  }
+
+  pre{
+    background:var(--code-bg);border:1px solid var(--code-bdr);
+    border-radius:10px;padding:22px 24px;margin:28px 0;
+    overflow-x:auto;font-family:'JetBrains Mono',monospace;
+    font-size:13px;line-height:1.7;color:var(--sp);position:relative;
+  }
+  pre::before{
+    content:attr(data-lang);position:absolute;top:10px;right:14px;
+    font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--muted);opacity:.6;font-family:'Outfit',sans-serif;
+  }
+  .k{color:var(--sk)}.s{color:var(--ss)}.c{color:var(--sc)}.f{color:var(--sf)}.n{color:var(--sn)}
+
+  .hl{
+    background:var(--hl-bg);padding:24px 28px;border-radius:10px;
+    margin:36px 0;border:1px solid var(--hl-bdr);
+    font-family:'Instrument Serif',Georgia,serif;
+    font-size:20px;font-style:italic;line-height:1.55;color:var(--head);
+  }
+
+  .tbl-wrap{margin:32px 0;overflow-x:auto;border-radius:10px;border:1px solid var(--tbl-bdr)}
+  table{width:100%;border-collapse:collapse;font-size:15px}
+  thead{background:var(--tbl-head)}
+  th{text-align:left;padding:12px 16px;font-weight:600;font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);border-bottom:2px solid var(--tbl-bdr)}
+  td{padding:12px 16px;border-bottom:1px solid var(--tbl-bdr);vertical-align:top}
+  tr:nth-child(even){background:var(--tbl-alt)}
+  tr:last-child td{border-bottom:none}
+  .g{color:var(--green);font-weight:600}
+  .y{color:var(--yellow);font-weight:600}
+
+  .stack{display:flex;flex-direction:column;gap:3px;margin:36px 0;font-size:14px;font-weight:500}
+  .stack-l{padding:16px 20px;border-radius:8px;text-align:center}
+  .stack-l:nth-child(1){background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-bdr)}
+  .stack-l:nth-child(2){background:var(--hl-bg);color:var(--text2);border:1px solid var(--border)}
+  .stack-l:nth-child(3){background:var(--code-bg);color:var(--muted);border:1px solid var(--code-bdr)}
+  .stack-a{text-align:center;color:var(--muted);font-size:12px;padding:2px 0}
+
+  a{color:var(--accent);text-decoration:none;border-bottom:1px solid transparent;transition:border-color .2s}
+  a:hover{border-color:var(--accent)}
+
+  .sep{text-align:center;color:var(--border);margin:56px 0;font-size:28px;letter-spacing:16px}
+  .end-note{color:var(--muted);font-size:15px;line-height:1.7;border-top:1px solid var(--border);padding-top:28px;margin-top:56px}
+
+  @keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+  @media(max-width:640px){
+    h1{font-size:32px}.sub{font-size:17px}body{font-size:16px}
+    .hdr{padding:36px 20px 0}.ct{padding:8px 20px 36px}
+    .tgl{top:14px;right:14px;width:38px;height:38px}h2{font-size:26px}
+    th,td{padding:10px 12px;font-size:14px}
+  }
+</style>
+</head>
+<body>
+
+<button class="tgl" aria-label="Toggle theme">
+  <span class="il">&#9728;&#65039;</span><span class="id">&#127769;</span>
+</button>
+
+<div class="hdr">
+  <div class="tag">Observation &middot; AI Infrastructure</div>
+  <h1>Will Bun Become the <em>New Shell?</em></h1>
+  <p class="sub">Anthropic acquired Bun three weeks after publishing a blog post about replacing MCP tool calls with TypeScript execution. Here's why that matters for how agents work.</p>
+  <div class="meta">
+    <span>Kasper Peulen</span>
+    <span class="dot">&middot;</span>
+    <span>April 2026</span>
+  </div>
+</div>
+
+<div class="ct">
+
+<pre data-lang="Shell"><span class="c"># Bash</span>
+grep -c <span class="s">"ERROR"</span> server.log
+
+<span class="c"># Bun</span>
+bun -e <span class="s">'console.log((await Bun.file("server.log").text()).split("\n").filter(l =&gt; l.includes("ERROR")).length)'</span></pre>
+
+<h2><span>The starting point</span>Using Bun to orchestrate MCP</h2>
+
+<p>On November 4, 2025, Anthropic published <a href="https://www.anthropic.com/engineering/code-execution-with-mcp"><em>"Code execution with MCP"</em></a>. The idea: instead of agents calling MCP tools one by one &mdash; each tool definition consuming context, each intermediate result flowing through the model &mdash; let the agent write TypeScript that orchestrates the calls directly in a runtime.</p>
+
+<p>A workflow that consumed 150,000 tokens was reimplemented this way. New cost: 2,000 tokens. Every example was TypeScript.</p>
+
+<p>Three weeks later, Anthropic <a href="https://www.anthropic.com/news/anthropic-acquires-bun-as-claude-code-reaches-usd1b-milestone">acquired Bun</a>.</p>
+
+<p>In January 2026, Claude Code shipped <a href="https://www.anthropic.com/engineering/advanced-tool-use"><strong>MCP Tool Search</strong></a> &mdash; deferred loading that pulls tool definitions into context only when needed. This reduced schema overhead by 85%. <a href="https://x.com/simonw/status/2011570719856214153">Simon Willison</a> reversed his stance on MCP: "This is great &mdash; now that it's solved there's no reason not to hook up dozens or even hundreds of MCPs."</p>
+
+<p>But deferred loading solves one half. It addresses tool <em>definitions</em> bloating context. The other half &mdash; intermediate <em>results</em> flowing through the model when chaining calls &mdash; is untouched. Grab a 50,000-token meeting transcript from Google Drive and attach it to Salesforce, and that data passes through the model twice, even with deferred loading.</p>
+
+<p>The blog post's code execution pattern solves this second half. The agent writes a script. The script handles the data. Only the final result hits context.</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>Problem</th><th>Solution</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Tool schemas bloating context</td><td>Deferred loading / Tool Search</td><td><span class="g">Shipped (Jan 2026)</span></td></tr>
+<tr><td>Intermediate results flowing through context</td><td>Agent writes code that orchestrates and filters in a runtime</td><td><span class="y">Proposed (Nov 2025)</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<p><a href="https://blog.cloudflare.com/code-mode/">Cloudflare has already shipped this pattern.</a> Their "Code Mode" exposes the entire Cloudflare API &mdash; 2,500+ endpoints &mdash; through just two MCP tools: <code>search()</code> and <code>execute()</code>. The agent writes TypeScript against a typed API. Context cost: ~1,000 tokens. A traditional MCP server for the same API: over 2 million.</p>
+
+<blockquote>
+  "We found agents are able to handle many more tools, and more complex tools, when those tools are presented as a TypeScript API rather than directly."
+  <span class="at">&mdash; Cloudflare, <a href="https://blog.cloudflare.com/code-mode/">"Code Mode"</a>, September 2025</span>
+</blockquote>
+
+<h2><span>Going further</span>Could Bun replace bash for agents?</h2>
+
+<blockquote>
+  "Agents are good at bash. Bash is not good for agents. We should cut our losses and restart now before it is too late."
+  <span class="at">&mdash; <a href="https://x.com/theo/highlights">Theo Browne (t3.gg)</a>, April 2026</span>
+</blockquote>
+
+<p>The code execution pattern doesn't just apply to MCP orchestration. It raises a broader question: if agents are going to write TypeScript to call tools, why not write TypeScript for everything they currently use bash for?</p>
+
+<p>There are two reasons this could make sense.</p>
+
+<p><strong>1. Output filtering.</strong> The same problem that plagues MCP tool chaining also plagues bash. When an agent runs a shell command that returns 10,000 lines, all of it flows into context. Yes, the agent can pipe through <code>grep</code>, <code>awk</code>, <code>head</code>, <code>tail</code>, or <code>jq</code> to try to find the right piece &mdash; but those operate on unstructured text or loosely-typed JSON. With TypeScript, the agent works with typed objects: <code>.filter()</code>, <code>.map()</code>, and <code>.reduce()</code> on real data structures in the runtime, and only <code>console.log()</code> what the model actually needs to see.</p>
+
+<pre data-lang="TypeScript"><span class="k">import</span> { drive } <span class="k">from</span> <span class="s">"&#64;anthropic/google"</span>;
+
+<span class="c">// 10,000 rows fetched &mdash; none hit context</span>
+<span class="k">const</span> rows = <span class="k">await</span> drive.<span class="f">getSheet</span>(<span class="s">"abc123"</span>);
+<span class="k">const</span> overdue = rows.<span class="f">filter</span>(r =&gt; r.status === <span class="s">"overdue"</span>);
+
+<span class="c">// Shell out for what shell is good at</span>
+<span class="k">await</span> Bun.$<span class="s">`git add . &amp;&amp; git commit -m </span><span class="n">${msg}</span><span class="s">`</span>;
+
+<span class="c">// Only this returns to the model</span>
+<span class="n">console</span>.<span class="f">log</span>(<span class="s">`${overdue.length} overdue items`</span>);</pre>
+
+<p><strong>2. Safe execution.</strong> The <a href="https://www.sabrina.dev/p/claude-code-source-leak-analysis">Claude Code source leak</a> showed how difficult it is to sandbox bash: two different command parsers running in parallel &mdash; one deprecated but still making security decisions &mdash; a <code>dangerouslyDisableSandbox</code> escape hatch, and a compaction routine reportedly wasting significant API calls. TypeScript in a controlled runtime sidesteps this. Cloudflare's Code Mode runs generated code in <a href="https://blog.cloudflare.com/dynamic-workers/">sandboxed Dynamic Workers</a> where outbound <code>fetch()</code> is blocked by default. The runtime enforces boundaries, not command parsers.</p>
+
+<h2><span>What Bun already is</span>A scripting runtime with fast primitives</h2>
+
+<p>Bun is interesting here not because it's faster than Node &mdash; though it is &mdash; but because it's designed as a scripting-first runtime. Some specifics:</p>
+
+<p><strong><a href="https://bun.com/docs/runtime/shell"><code>Bun.$</code></a></strong> provides a built-in cross-platform shell with automatic escaping. But shelling out has overhead. For performance-critical operations, Bun ships fast native primitives &mdash; <a href="https://bun.com/docs/api/glob">glob</a>, <a href="https://bun.com/docs/api/file-io">file I/O</a>, <a href="https://bun.com/docs/api/hashing">hashing</a> &mdash; that avoid spawning processes entirely. Startup is ~5ms. And once running, chaining multiple operations through native APIs is significantly faster than sequential shell commands.</p>
+
+<pre data-lang="TypeScript"><span class="c">// An agent gathering project stats &mdash; no processes spawned</span>
+<span class="k">import</span> { Glob } <span class="k">from</span> <span class="s">"bun"</span>;
+
+<span class="k">const</span> glob = <span class="k">new</span> <span class="f">Glob</span>(<span class="s">"src/**/*.ts"</span>);
+<span class="k">const</span> files = [];
+
+<span class="k">for await</span> (<span class="k">const</span> path <span class="k">of</span> glob.<span class="f">scan</span>({ cwd: <span class="s">"."</span> })) {
+  <span class="k">const</span> f = Bun.<span class="f">file</span>(path);
+  files.<span class="f">push</span>({ path, size: f.size });
+}
+
+<span class="k">const</span> total = files.<span class="f">reduce</span>((s, f) =&gt; s + f.size, <span class="n">0</span>);
+<span class="k">const</span> largest = files.<span class="f">sort</span>((a, b) =&gt; b.size - a.size).<span class="f">slice</span>(<span class="n">0</span>, <span class="n">5</span>);
+
+<span class="c">// Only this reaches the model</span>
+<span class="n">console</span>.<span class="f">log</span>(<span class="s">`${files.length} files, ${(total / 1024).toFixed(0)}KB total`</span>);
+<span class="n">console</span>.<span class="f">log</span>(<span class="s">`Largest:`</span>, largest.<span class="f">map</span>(f =&gt; f.path));</pre>
+
+<p><strong><a href="https://bun.com/docs/runtime/auto-install">Auto-install.</a></strong> The agent can <code>import</code> any package without an <code>npm install</code> step. No <code>package.json</code> required. Bun resolves, caches, runs. The script is self-contained.</p>
+
+<pre data-lang="Shell"><span class="c"># -i auto-installs lodash on first run, caches it after</span>
+bun -i -e <span class="s">'import _ from "lodash"; console.log(_.chunk([1,2,3,4,5,6], 2))'</span></pre>
+
+<p><strong>Native TypeScript.</strong> Run <code>.ts</code> directly. No config, no build step.</p>
+
+<p>And Anthropic now controls Bun's direction. Jarred Sumner <a href="https://bun.com/blog/bun-joins-anthropic">described the post-acquisition mission</a> as making Bun "the best place to build, run, and test AI-driven software." That control matters for two reasons beyond features.</p>
+
+<p><strong>Performance as infrastructure.</strong> When a runtime sits between every agent action and every external service, milliseconds compound. An agent orchestrating a dozen API calls, filtering results, and writing files isn't running one script &mdash; it's running hundreds per session. Bun's ~5ms startup and native-speed primitives aren't nice-to-haves at that scale. They're the difference between an agent that feels responsive and one that doesn't. Anthropic can now optimize the runtime specifically for this workload.</p>
+
+<p><strong>Sandboxing by design.</strong> The safe execution argument cuts deeper when you own the runtime. Anthropic doesn't need to bolt sandboxing onto an existing shell &mdash; they can build it into Bun itself. Imagine a <code>--sandbox</code> flag that restricts filesystem access, blocks outbound network by default, and enforces capability-based permissions at the runtime level. Not a wrapper around <code>bash</code>. Not a container. A runtime that is the sandbox. Cloudflare proved this works with Dynamic Workers. Anthropic can now do the same thing locally.</p>
+
+<h2><span>The shape of things</span>Do agents even need MCP?</h2>
+
+<p>If the agent writes TypeScript and Bun runs it, the interface to external services doesn't need to be a protocol at all. It could just be packages.</p>
+
+<pre data-lang="TypeScript"><span class="k">import</span> { drive } <span class="k">from</span> <span class="s">"&#64;anthropic/google"</span>;
+<span class="k">import</span> { channels } <span class="k">from</span> <span class="s">"&#64;anthropic/slack"</span>;
+
+<span class="k">const</span> doc = <span class="k">await</span> drive.<span class="f">getDocument</span>(<span class="s">"abc123"</span>);
+<span class="k">await</span> channels.<span class="f">post</span>(<span class="s">"general"</span>, doc.summary);</pre>
+
+<p>Or a more complex workflow &mdash; cross-referencing services, filtering locally, reporting only the result:</p>
+
+<pre data-lang="TypeScript"><span class="k">import</span> { calendar } <span class="k">from</span> <span class="s">"&#64;anthropic/google"</span>;
+<span class="k">import</span> { issues } <span class="k">from</span> <span class="s">"&#64;anthropic/linear"</span>;
+<span class="k">import</span> { channels } <span class="k">from</span> <span class="s">"&#64;anthropic/slack"</span>;
+
+<span class="c">// Fetch from three services in parallel</span>
+<span class="k">const</span> [meetings, tickets] = <span class="k">await</span> Promise.<span class="f">all</span>([
+  calendar.<span class="f">getEvents</span>({ date: <span class="s">"today"</span> }),
+  issues.<span class="f">list</span>({ assignee: <span class="s">"me"</span>, state: <span class="s">"active"</span> }),
+]);
+
+<span class="c">// Cross-reference locally &mdash; zero tokens spent</span>
+<span class="k">const</span> atRisk = tickets.<span class="f">filter</span>(t =&gt;
+  t.dueDate === <span class="s">"today"</span> &amp;&amp;
+  meetings.<span class="f">some</span>(m =&gt; m.duration &gt; <span class="n">60</span>)
+);
+
+<span class="k">if</span> (atRisk.length) {
+  <span class="k">const</span> summary = atRisk.<span class="f">map</span>(t =&gt; <span class="s">`&bull; ${t.title}`</span>).<span class="f">join</span>(<span class="s">"\n"</span>);
+  <span class="k">await</span> channels.<span class="f">post</span>(<span class="s">"standup"</span>, <span class="s">`&#9888;&#65039; ${atRisk.length} tickets due today, blocked by long meetings:\n${summary}`</span>);
+}
+
+<span class="c">// Model sees: "Posted 2 at-risk tickets to #standup"</span>
+<span class="n">console</span>.<span class="f">log</span>(<span class="s">`Posted ${atRisk.length} at-risk tickets to #standup`</span>);</pre>
+
+<p>Three services, parallel fetching, local filtering, conditional action &mdash; all in one script. The model sees one line of output. No tool schemas were loaded. No MCP server was running.</p>
+
+<p>With auto-install, no setup step. Maybe MCP survives as invisible plumbing underneath &mdash; the way HTTP is invisible when you use an SDK. The <a href="https://milvus.io/blog/is-mcp-dead-cli-and-skills-for-ai-agents.md">97 million monthly SDK downloads</a> and adoption by OpenAI, Google, Microsoft, and AWS suggest momentum. But maybe it doesn't survive at all. If the agent can <code>import</code> a typed package and call APIs directly, what is MCP adding? A protocol is useful when you need a standard interface between arbitrary parties. An agent that writes code doesn't need a standard interface &mdash; it needs types, documentation, and a safe execution layer.</p>
+
+<h2><span>Context</span>What others have observed</h2>
+
+<blockquote>
+  "Anthropic bought Bun because they want to control the place where AI-written code actually runs."
+  <span class="at">&mdash; <a href="https://www.nibzard.com/bun-acquisition">Nibzard</a>, December 2025</span>
+</blockquote>
+
+<blockquote>
+  "Models require a 'controllable execution substrate' rather than a traditional operating system. No mainstream large model vendor has ever directly acquired a mature general-purpose language runtime before."
+  <span class="at">&mdash; <a href="https://jimmysong.io/blog/bun-anthropic-runtime-shift/">Jimmy Song</a>, December 2025</span>
+</blockquote>
+
+<p>MCP, CLI, bash &mdash; these are all interfaces designed for a world where the caller can't write code. Protocols exist so that dumb clients can talk to smart servers. Command-line tools exist so that humans can type instructions. But an agent that generates TypeScript doesn't need any of that. Google, Slack, Linear, Stripe &mdash; they all ship TypeScript SDKs already, many with millions of weekly downloads. MCP wraps those SDKs in a protocol so that tool-calling agents can use them. An agent that writes code can just use the SDKs directly. The protocol becomes a redundant abstraction.</p>
+
+<p>That's what makes the Bun acquisition legible. Anthropic didn't buy a JavaScript bundler. They bought the execution layer.</p>
+
+<h2><span>The open question</span>So will Bun become the new bash?</h2>
+
+<p>The pieces are in place. Anthropic owns the runtime. The code execution pattern is proven. Deferred loading handles tool definitions; code execution handles intermediate results. The question is whether this stays a power-user pattern or becomes the default.</p>
+
+<p>That depends on training. Today's models are steeped in bash &mdash; decades of Stack Overflow answers, man pages, and dotfiles in the training data. If Anthropic starts training models to reach for <code>Bun.$</code> before <code>/bin/sh</code>, to <code>.filter()</code> before <code>grep</code>, the shift could happen fast. They own the runtime and the model &mdash; that's a tight feedback loop.</p>
+
+<p>Meanwhile, I've already switched. I've set up my agent to run everything through <code>bun -e</code>. No more bash. So far, it works great. Excited to see how this will unfold!</p>
+
+<div class="sep">&middot;&middot;&middot;</div>
+
+<p class="end-note">Sources: Anthropic's <a href="https://www.anthropic.com/engineering/code-execution-with-mcp">"Code execution with MCP"</a> (Nov 2025), <a href="https://www.anthropic.com/news/anthropic-acquires-bun-as-claude-code-reaches-usd1b-milestone">Bun acquisition</a> (Dec 2025), <a href="https://bun.com/blog/bun-joins-anthropic">Bun joins Anthropic</a> (Dec 2025), <a href="https://www.anthropic.com/engineering/advanced-tool-use">Advanced tool use</a> (Jan 2026), <a href="https://blog.cloudflare.com/code-mode/">Cloudflare Code Mode</a> (Sep 2025), <a href="https://blog.cloudflare.com/dynamic-workers/">Dynamic Workers</a> (Mar 2026), <a href="https://www.sabrina.dev/p/claude-code-source-leak-analysis">Claude Code leak analysis</a> (Apr 2026).</p>
+
+</div>
+
+<script>
+try{
+  var s=localStorage.getItem('theme');
+  if(s)document.documentElement.setAttribute('data-theme',s);
+  else if(window.matchMedia&&window.matchMedia('(prefers-color-scheme:dark)').matches)
+    document.documentElement.setAttribute('data-theme','dark');
+}catch(e){}
+document.querySelector('.tgl').addEventListener('click',function(){
+  var h=document.documentElement;
+  var n=h.getAttribute('data-theme')==='light'?'dark':'light';
+  h.setAttribute('data-theme',n);
+  try{localStorage.setItem('theme',n)}catch(e){}
+});
+</script>
+
+</body>
+</html>
