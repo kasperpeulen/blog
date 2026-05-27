@@ -195,16 +195,20 @@
 
 <div class="ct">
 
-<pre data-lang="Shell"><span class="c"># Same thesis as the Bun post, different runtime</span>
-Bun   : agent writes JavaScript, runtime talks to the OS
-Codex : agent writes JavaScript, V8 isolate talks to Codex tools
+<pre data-lang="Code Mode"><span class="c">// Shell</span>
+grep -c <span class="s">"ERROR"</span> server.log
 
-<span class="c"># The two public Code Mode tools</span>
-exec input:
-text(<span class="s">"run raw JavaScript in a fresh V8 isolate"</span>)
+<span class="c">// Codex Code Mode: exec receives raw JavaScript</span>
+<span class="k">const</span> { output } = <span class="k">await</span> tools.<span class="f">exec_command</span>({
+  cmd: <span class="s">"cat server.log"</span>,
+});
 
-wait arguments:
-{ <span class="s">"cell_id"</span>: <span class="s">"1"</span>, <span class="s">"yield_time_ms"</span>: 10000 }</pre>
+<span class="k">const</span> errors = output
+  .<span class="f">split</span>(<span class="s">"\n"</span>)
+  .<span class="f">filter</span>((line) =&gt; line.<span class="f">includes</span>(<span class="s">"ERROR"</span>));
+
+<span class="c">// Only this value goes back to the agent.</span>
+<span class="f">text</span>(String(errors.length));</pre>
 
 <h2><span>The starting point</span>A hidden switch in the harness</h2>
 
