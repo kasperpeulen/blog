@@ -195,19 +195,27 @@
 
 <div class="ct">
 
-<pre data-lang="Shell">grep -c <span class="s">"ERROR"</span> server.log</pre>
+<pre data-lang="Shell">git grep -n -E <span class="s">"TODO|FIXME"</span> -- codex-rs | wc -l</pre>
 
 <pre data-lang="Code Mode"><span class="c">// exec receives raw JavaScript inside a V8 isolate.</span>
 <span class="k">const</span> { output } = <span class="k">await</span> tools.<span class="f">exec_command</span>({
-  cmd: <span class="s">"cat server.log"</span>,
+  cmd: <span class="s">'git grep -n -E "TODO|FIXME" -- codex-rs || true'</span>,
+  max_output_tokens: <span class="n">20000</span>,
 });
 
-<span class="k">const</span> errors = output
-  .<span class="f">split</span>(<span class="s">"\n"</span>)
-  .<span class="f">filter</span>((line) =&gt; line.<span class="f">includes</span>(<span class="s">"ERROR"</span>));
+<span class="k">const</span> byCrate = {};
+<span class="k">for</span> (<span class="k">const</span> line <span class="k">of</span> output.<span class="f">trim</span>().<span class="f">split</span>(<span class="s">"\n"</span>).<span class="f">filter</span>(Boolean)) {
+  <span class="k">const</span> crate = line.<span class="f">split</span>(<span class="s">"/"</span>).<span class="f">slice</span>(<span class="n">0</span>, <span class="n">2</span>).<span class="f">join</span>(<span class="s">"/"</span>);
+  byCrate[crate] = (byCrate[crate] ?? <span class="n">0</span>) + <span class="n">1</span>;
+}
 
-<span class="c">// Only this value goes back to the agent.</span>
-<span class="f">text</span>(String(errors.length));</pre>
+<span class="c">// The model sees a tiny summary, not every grep hit.</span>
+<span class="f">text</span>(JSON.<span class="f">stringify</span>({
+  total: Object.<span class="f">values</span>(byCrate).<span class="f">reduce</span>((sum, n) =&gt; sum + n, <span class="n">0</span>),
+  hot_spots: Object.<span class="f">entries</span>(byCrate)
+    .<span class="f">sort</span>((a, b) =&gt; b[<span class="n">1</span>] - a[<span class="n">1</span>])
+    .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">5</span>),
+}, <span class="k">null</span>, <span class="n">2</span>));</pre>
 
 <h2><span>The starting point</span>A hidden switch in the harness</h2>
 
@@ -251,13 +259,31 @@
 
 <p>The important practical detail is the return channel. A Code Mode script can call tools, branch, filter, and keep intermediate results private inside V8. The model does not automatically see all of that. The model sees what the script gives back through <code>text()</code> or <code>image()</code> when <code>exec</code> or <code>wait</code> yields or completes. In other words, <code>text()</code> is closer to "return this to the agent" than "print this to the user."</p>
 
-<pre data-lang="TypeScript"><span class="c">// Awaiting the shell tool gives the output to JavaScript, not to the model.</span>
-<span class="k">const</span> status = <span class="k">await</span> tools.<span class="f">exec_command</span>({ cmd: <span class="s">"git status --short"</span> });
+<pre data-lang="TypeScript"><span class="c">// Awaiting tools gives the output to JavaScript, not directly to the model.</span>
+<span class="k">const</span> [diff, tests] = <span class="k">await</span> Promise.<span class="f">all</span>([
+  tools.<span class="f">exec_command</span>({ cmd: <span class="s">"git diff --stat"</span>, max_output_tokens: <span class="n">4000</span> }),
+  tools.<span class="f">exec_command</span>({
+    cmd: <span class="s">"pnpm test -- --reporter=json"</span>,
+    max_output_tokens: <span class="n">40000</span>,
+  }),
+]);
+
+<span class="c">// The script can parse, filter, and summarize a noisy test payload locally.</span>
+<span class="k">let</span> failures = [];
+<span class="k">try</span> {
+  failures = JSON.<span class="f">parse</span>(tests.output).testResults
+    .<span class="f">flatMap</span>((file) =&gt; file.assertionResults ?? [])
+    .<span class="f">filter</span>((test) =&gt; test.status === <span class="s">"failed"</span>)
+    .<span class="f">map</span>((test) =&gt; test.fullName)
+    .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">10</span>);
+} <span class="k">catch</span> {}
 
 <span class="c">// text(...) is the return channel back to the agent/model.</span>
-<span class="f">text</span>(status.output);
-
-<span class="c">// Without text(...) or image(...), the agent gets no useful final payload.</span></pre>
+<span class="f">text</span>(JSON.<span class="f">stringify</span>({
+  changed: diff.output.<span class="f">trim</span>(),
+  failed_tests: failures,
+  exit_code: tests.exit_code,
+}, <span class="k">null</span>, <span class="n">2</span>));</pre>
 
 <div class="tbl-wrap">
 <table>
@@ -275,14 +301,27 @@
 </table>
 </div>
 
-<pre data-lang="TypeScript"><span class="c">// notify(...) is for an early update to the model.</span>
-<span class="f">notify</span>(<span class="s">"Starting tests now"</span>);
+<pre data-lang="TypeScript"><span class="c">// notify(...) is an early update to the model while JS keeps running.</span>
+<span class="f">notify</span>(<span class="s">"Found the relevant Slack context; running the local repro now."</span>);
 
-<span class="c">// The script can keep doing real work after the notification.</span>
-<span class="k">const</span> tests = <span class="k">await</span> tools.<span class="f">exec_command</span>({ cmd: <span class="s">"pnpm test"</span> });
+<span class="k">const</span> [threads, repro] = <span class="k">await</span> Promise.<span class="f">all</span>([
+  tools.<span class="f">slack_slack_search_public_and_private</span>({
+    query: <span class="s">'"Code Mode" "V8 isolate" after:2026-05-01'</span>,
+    limit: <span class="n">10</span>,
+    include_context: <span class="k">false</span>,
+  }),
+  tools.<span class="f">exec_command</span>({
+    cmd: <span class="s">"pnpm test codex-rs/core/tests/suite/code_mode.rs"</span>,
+    max_output_tokens: <span class="n">12000</span>,
+  }),
+]);
 
 <span class="c">// text(...) is the final payload the model gets from this exec call.</span>
-<span class="f">text</span>(tests.output);</pre>
+<span class="f">text</span>(JSON.<span class="f">stringify</span>({
+  slack_hits: (threads.results ?? threads.matches ?? []).length,
+  repro_exit_code: repro.exit_code,
+  last_lines: repro.output.<span class="f">split</span>(<span class="s">"\n"</span>).<span class="f">slice</span>(-<span class="n">20</span>),
+}, <span class="k">null</span>, <span class="n">2</span>));</pre>
 
 <h2><span>The TypeScript side</span>Declarations, not <code>tsc</code></h2>
 
@@ -313,9 +352,107 @@
 </table>
 </div>
 
+<h2><span>Agent examples</span>The old Bun scripts in Codex clothes</h2>
+
+<p>The old Bun post had more interesting examples because it showed whole workflows: calendar, Slack, Linear, sheets, local filtering, one-line output. Code Mode wants the same shape, with one important difference. Bun can import SDKs. Codex's V8 cell cannot import anything. It composes the tools Codex already approved and described to the model.</p>
+
+<p>So the normal path is not "search <code>ALL_TOOLS</code> and hope." The model should already have generated declarations for known tools before it writes JavaScript. The examples below use connector-style names from the current tool catalog, normalized into JavaScript identifiers.</p>
+
+<pre data-lang="TypeScript"><span class="c">// Meeting prep: Calendar, Linear, Slack, Notion; one tiny return value.</span>
+<span class="k">const</span> [calendar, tickets, slack, notes] = <span class="k">await</span> Promise.<span class="f">all</span>([
+  tools.<span class="f">google_calendar_search_events</span>({
+    query: <span class="s">"Code Mode"</span>,
+    time_min: <span class="s">"2026-05-27T00:00:00Z"</span>,
+    time_max: <span class="s">"2026-05-28T00:00:00Z"</span>,
+    max_results: <span class="n">10</span>,
+  }),
+  tools.<span class="f">linear_list_issues</span>({
+    assignee: <span class="s">"me"</span>,
+    state: <span class="s">"active"</span>,
+    priority: <span class="n">2</span>,
+    limit: <span class="n">50</span>,
+    orderBy: <span class="s">"updatedAt"</span>,
+  }),
+  tools.<span class="f">slack_slack_search_public_and_private</span>({
+    query: <span class="s">'"Code Mode" "MCP" after:2026-05-01'</span>,
+    limit: <span class="n">20</span>,
+    include_context: <span class="k">false</span>,
+  }),
+  tools.<span class="f">notion_search</span>({
+    query: <span class="s">"Code Mode MCP launch notes"</span>,
+    query_type: <span class="s">"internal"</span>,
+    page_size: <span class="n">5</span>,
+    filters: {},
+  }),
+]);
+
+<span class="c">// All the noisy result shapes stay inside the V8 cell.</span>
+<span class="k">const</span> meetings = (calendar.items ?? calendar.events ?? [])
+  .<span class="f">map</span>((event) =&gt; event.summary ?? event.title)
+  .<span class="f">filter</span>(Boolean);
+
+<span class="k">const</span> highPriority = (tickets.issues ?? tickets.nodes ?? tickets.results ?? [])
+  .<span class="f">map</span>((issue) =&gt; issue.identifier ?? issue.title)
+  .<span class="f">filter</span>(Boolean)
+  .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">10</span>);
+
+<span class="k">const</span> threads = (slack.results ?? slack.matches ?? [])
+  .<span class="f">map</span>((hit) =&gt; hit.permalink ?? hit.url ?? hit.text)
+  .<span class="f">filter</span>(Boolean)
+  .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">5</span>);
+
+<span class="k">const</span> docs = (notes.results ?? [])
+  .<span class="f">map</span>((page) =&gt; page.title ?? page.url)
+  .<span class="f">filter</span>(Boolean);
+
+<span class="c">// The model gets the brief, not every calendar event and Slack hit.</span>
+<span class="f">text</span>(JSON.<span class="f">stringify</span>({
+  meetings,
+  high_priority_tickets: highPriority,
+  threads,
+  docs,
+}, <span class="k">null</span>, <span class="n">2</span>));</pre>
+
+<p>That is basically the old Calendar + Linear + Slack + notes example, but with Codex's security boundary preserved. The JavaScript has no direct network. It can only ask approved tools to do work, then reduce the returned objects before calling <code>text()</code>.</p>
+
+<pre data-lang="TypeScript"><span class="c">// Spreadsheet triage: large table in, small action list out.</span>
+<span class="k">const</span> [sheet, discussion] = <span class="k">await</span> Promise.<span class="f">all</span>([
+  tools.<span class="f">google_drive_search_spreadsheet_rows</span>({
+    spreadsheet_id: <span class="s">"roadmap-sheet-id"</span>,
+    sheet_name: <span class="s">"Risks"</span>,
+    query: <span class="s">"open"</span>,
+    start_row: <span class="n">1</span>,
+    end_row: <span class="n">500</span>,
+    start_column: <span class="s">"A"</span>,
+    end_column: <span class="s">"H"</span>,
+    max_matching_rows: <span class="n">100</span>,
+  }),
+  tools.<span class="f">slack_slack_search_public_and_private</span>({
+    query: <span class="s">'"release risk" after:2026-05-01'</span>,
+    limit: <span class="n">20</span>,
+    include_context: <span class="k">false</span>,
+  }),
+]);
+
+<span class="k">const</span> rows = sheet.rows ?? sheet.matches ?? [];
+<span class="k">const</span> blockers = rows
+  .<span class="f">filter</span>((row) =&gt; /blocked|critical|at risk/i.<span class="f">test</span>(JSON.<span class="f">stringify</span>(row)))
+  .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">10</span>);
+
+<span class="k">const</span> links = (discussion.results ?? discussion.matches ?? [])
+  .<span class="f">map</span>((hit) =&gt; hit.permalink ?? hit.url)
+  .<span class="f">filter</span>(Boolean)
+  .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">5</span>);
+
+<span class="f">text</span>(JSON.<span class="f">stringify</span>({
+  blocker_count: blockers.length,
+  blockers,
+  related_slack_threads: links,
+}, <span class="k">null</span>, <span class="n">2</span>));</pre>
+
 <h2><span>Actual tests</span>The repo patterns are concrete</h2>
 
-<p>The best examples are not in docs. They are in <code>codex-rs/core/tests/suite/code_mode.rs</code>. They show the intended behavior much more clearly than my earlier sketches.</p>
+<p>The examples above are the practical shape. The proof is lower-level and lives in <code>codex-rs/core/tests/suite/code_mode.rs</code>. Those tests show what Code Mode actually guarantees.</p>
 
 <p><strong>1. Nested tools are normal async functions.</strong> Even in <code>code_mode_only</code>, where the top-level model prompt only lists <code>exec</code> and <code>wait</code>, JavaScript can still call registered nested tools.</p>
 
@@ -412,7 +549,29 @@ wait {
     <span class="s">`contentLength=${content.length}`</span>
 );</pre>
 
-<p>The important bit is the result shape. Code Mode can inspect MCP <code>content</code>, <code>structuredContent</code>, and <code>isError</code> fields in JavaScript before returning anything to the model. Separate tests cover text-only MCP results, structured MCP results, MCP image blocks passed through <code>image()</code>, and <code>code_mode_only</code> calling MCP tools even when only <code>exec</code> and <code>wait</code> were visible at the top level.</p>
+<pre data-lang="TypeScript"><span class="c">// From code_mode_can_use_mcp_image_result_with_image_helper</span>
+<span class="c">// MCP image blocks can be forwarded as image output to the agent.</span>
+<span class="k">const</span> out = <span class="k">await</span> tools.<span class="f">mcp__rmcp__image_scenario</span>({
+  scenario: <span class="s">"image_only_original_detail"</span>,
+});
+
+<span class="k">const</span> imageItem = out.content.<span class="f">find</span>((item) =&gt; item.type === <span class="s">"image"</span>);
+<span class="f">image</span>(imageItem);</pre>
+
+<pre data-lang="TypeScript"><span class="c">// From code_mode_can_print_error_mcp_tool_result_fields</span>
+<span class="c">// Tool errors are data the JS cell can inspect before summarizing.</span>
+<span class="k">const</span> bad = <span class="k">await</span> tools.<span class="f">mcp__rmcp__echo</span>({});
+<span class="k">const</span> firstText = bad.content[<span class="n">0</span>]?.text ?? <span class="s">""</span>;
+
+<span class="f">text</span>(JSON.<span class="f">stringify</span>({
+  is_error: bad.isError,
+  content_items: bad.content.length,
+  missing_message:
+    firstText.<span class="f">includes</span>(<span class="s">"missing field"</span>) &amp;&amp;
+    firstText.<span class="f">includes</span>(<span class="s">"message"</span>),
+}, <span class="k">null</span>, <span class="n">2</span>));</pre>
+
+<p>The important bit is the result shape. Code Mode can inspect MCP <code>content</code>, <code>structuredContent</code>, and <code>isError</code> fields in JavaScript before returning anything to the model. Separate tests cover text-only MCP results, structured MCP results, MCP image blocks passed through <code>image()</code>, error results summarized into booleans, and <code>code_mode_only</code> calling MCP tools even when only <code>exec</code> and <code>wait</code> were visible at the top level.</p>
 
 <div class="sep">&middot;&middot;&middot;</div>
 
