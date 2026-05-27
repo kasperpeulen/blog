@@ -185,7 +185,7 @@
 <div class="hdr">
   <div class="tag">Source Dive &middot; Agent Infrastructure</div>
   <h1>V8 isolates are the <em>new shell</em> in Codex Code Mode</h1>
-  <p class="sub">I cloned the OpenAI Codex repo, inspected the hidden Code Mode internals, and found that Codex is using V8 isolates, not Bun, to make JavaScript the agent shell.</p>
+  <p class="sub">I cloned the OpenAI Codex repo and read the Code Mode internals. Codex makes JavaScript the agent shell with in-process V8 isolates &mdash; not Bun, not subprocesses.</p>
   <div class="meta">
     <span>Kasper Peulen</span>
     <span class="dot">&middot;</span>
@@ -197,7 +197,7 @@
 
 <pre data-lang="Shell">git grep -n -E <span class="s">"TODO|FIXME"</span> -- codex-rs | wc -l</pre>
 
-<pre data-lang="Code Mode"><span class="c">// exec receives raw JavaScript inside a V8 isolate.</span>
+<pre data-lang="Code Mode"><span class="c">// exec receives raw JavaScript. Codex runs it inside a fresh V8 isolate.</span>
 <span class="k">const</span> { output } = <span class="k">await</span> tools.<span class="f">exec_command</span>({
   cmd: <span class="s">'git grep -n -E "TODO|FIXME" -- codex-rs || true'</span>,
   max_output_tokens: <span class="n">20000</span>,
@@ -209,7 +209,7 @@
   byCrate[crate] = (byCrate[crate] ?? <span class="n">0</span>) + <span class="n">1</span>;
 }
 
-<span class="c">// The model sees a tiny summary, not every grep hit.</span>
+<span class="c">// Only this small JSON reaches model context.</span>
 <span class="f">text</span>(JSON.<span class="f">stringify</span>({
   total: Object.<span class="f">values</span>(byCrate).<span class="f">reduce</span>((sum, n) =&gt; sum + n, <span class="n">0</span>),
   hot_spots: Object.<span class="f">entries</span>(byCrate)
@@ -217,61 +217,42 @@
     .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">5</span>),
 }, <span class="k">null</span>, <span class="n">2</span>));</pre>
 
-<h2><span>The starting point</span>A hidden switch in the harness</h2>
+<h2><span>The hidden switch</span>Two flags, two tools</h2>
 
-<p>Codex ships its own JavaScript execution path. It runs in in-process V8 isolates, not Bun. The shape is still the one from <a href="https://kasperpeulen.github.io/blog/">the Bun post</a>: the agent writes a small program, the runtime holds the intermediate results, and only the selected output goes back into model context.</p>
+<p>Codex 0.134.0 ships two off-by-default feature flags: <code>code_mode</code> and <code>code_mode_only</code>. Turning on <code>code_mode_only</code> also turns on <code>code_mode</code>. With them set, the model's tool surface collapses to two entries: <code>exec</code> and <code>wait</code>.</p>
 
-<p>The feature registry contains two under-development flags: <code>code_mode</code> and <code>code_mode_only</code>. On my installed <code>codex-cli 0.134.0</code>, both are off by default. Enabling <code>code_mode_only</code> also enables <code>code_mode</code>.</p>
+<p><code>exec</code> is a freeform tool. The model sends raw JavaScript source text &mdash; not JSON, not a fenced block. Codex strips an optional <code>// @exec:</code> pragma, allocates a cell id, spins up a fresh V8 isolate, and evaluates the source as an async module. The call returns either the completed output or a <code>Script running with cell ID ...</code> header if execution exceeds the 10-second yield window.</p>
 
-<p>The model sees two public tools: <code>exec</code> and <code>wait</code>. <code>exec</code> is a freeform tool: the model sends raw JavaScript source text, not JSON and not a markdown code fence. Codex parses an optional first-line pragma, allocates a cell id, starts a fresh V8 isolate, evaluates the source as an async module, and returns either a completed result or a "Script running with cell ID ..." header.</p>
-
-<p><code>wait</code> is the companion function tool. It takes a <code>cell_id</code>, waits for new output from that already-running isolate, optionally truncates the returned output with <code>max_tokens</code>, and can terminate the cell with <code>terminate: true</code>. The tests prove that one turn can start a cell, later turns can wait on it, multiple cells can be alive at once, and termination does not poison later <code>exec</code> calls.</p>
+<p><code>wait</code> is the companion. It takes a <code>cell_id</code> and resumes a still-running isolate, returning only output emitted since the previous yield. Pass <code>terminate: true</code> to kill the cell. The tests confirm multiple cells can be alive at once and a terminated cell leaves later <code>exec</code> calls unaffected.</p>
 
 <div class="tbl-wrap">
 <table>
-<thead><tr><th>Surface</th><th>What the repo actually does</th><th>Source signal</th></tr></thead>
+<thead><tr><th>Surface</th><th>What the repo does</th><th>Source signal</th></tr></thead>
 <tbody>
-<tr><td><code>exec</code></td><td>Runs raw JavaScript in a fresh V8 isolate. Default yield window: 10 seconds. Default output budget: 10,000 tokens.</td><td><span class="g">Description and constants</span></td></tr>
-<tr><td><code>wait</code></td><td>Polls or terminates a running cell. Returns only new output since the previous yield, or the final completion result.</td><td><span class="g">Wait spec and tests</span></td></tr>
-<tr><td><code>code_mode_only</code></td><td>Shows only <code>exec</code> and <code>wait</code> to the model, while nested tools remain callable from JavaScript.</td><td><span class="y">Under development</span></td></tr>
+<tr><td><code>exec</code></td><td>Compiles raw JavaScript as an ES module and evaluates it in a fresh V8 isolate. 10-second yield window, 10,000-token default output budget.</td><td><span class="g">Description and constants</span></td></tr>
+<tr><td><code>wait</code></td><td>Polls or terminates a running cell. Returns only new output since the last yield.</td><td><span class="g">Wait spec and tests</span></td></tr>
+<tr><td><code>code_mode_only</code></td><td>Hides every nested tool from the top-level prompt while keeping them callable from JavaScript.</td><td><span class="y">Under development</span></td></tr>
 </tbody>
 </table>
 </div>
 
-<h2><span>The machinery</span>A V8 cell between the model and tools</h2>
+<h2><span>The runtime</span>A V8 cell between the model and tools</h2>
 
-<p>The implementation is split across three places. <code>codex-rs/code-mode</code> owns the V8 runtime, globals, cells, waits, timers, image/text helpers, and stored values. <code>codex-rs/core/src/tools/code_mode</code> adapts that runtime into Codex's tool system. <code>codex-rs/tools/src/code_mode.rs</code> converts ordinary tool specs into nested JavaScript functions and appends TypeScript declarations to their descriptions.</p>
+<p>The implementation splits across three locations. <code>codex-rs/code-mode</code> owns the V8 runtime: globals, cell lifecycle, waits, timers, image and text buffering, the session store. <code>codex-rs/core/src/tools/code_mode</code> wires that runtime into the Codex tool system. <code>codex-rs/tools/src/code_mode.rs</code> converts ordinary tool specs into nested JavaScript functions and renders their JSON Schemas as TypeScript declarations.</p>
 
 <div class="stack">
-  <div class="stack-l">Model sees <code>exec</code> and writes JavaScript</div>
-  <div class="stack-a">calls</div>
-  <div class="stack-l">V8 isolate exposes <code>tools</code>, <code>ALL_TOOLS</code>, <code>text</code>, <code>image</code>, <code>store</code>, <code>load</code>, <code>notify</code>, <code>yield_control</code>, <code>exit</code></div>
-  <div class="stack-a">proxies</div>
-  <div class="stack-l">Codex runs the real shell, MCP, browser, app, or workspace tool</div>
+  <div class="stack-l">Model writes JavaScript and sends it to <code>exec</code></div>
+  <div class="stack-a">evaluates in</div>
+  <div class="stack-l">V8 isolate with <code>tools</code>, <code>ALL_TOOLS</code>, <code>text</code>, <code>image</code>, <code>store</code>, <code>load</code>, <code>notify</code>, <code>yield_control</code>, <code>exit</code></div>
+  <div class="stack-a">proxies to</div>
+  <div class="stack-l">Codex runs the real shell, MCP server, browser, app, or workspace tool</div>
 </div>
 
-<p>The runtime deletes <code>console</code>, <code>Atomics</code>, <code>SharedArrayBuffer</code>, and <code>WebAssembly</code>. Module imports are unsupported. There is no Node, no direct filesystem, and no direct network. If the script wants power, it has to ask a Codex tool for it.</p>
+<p>The isolate is minimal by construction. The runtime deletes <code>console</code>, <code>Atomics</code>, <code>SharedArrayBuffer</code>, and <code>WebAssembly</code>. <code>import</code> is unsupported. There is no Node API, no filesystem handle, no <code>fetch</code>. To do anything outside the isolate the script must call a function on <code>tools</code>, which round-trips back through Codex's tool runtime as a real tool call.</p>
 
-<p>The repo does not include a startup benchmark, so this measurement uses the path Code Mode actually runs: <code>CodeModeService::execute</code> in a release build, after warmup, against <code>bun -e</code> process startup. Same machine, Apple M1 Pro, macOS Darwin 24.6.0, Bun <code>1.3.11</code>, Codex <code>a75c443</code>, 1,000 iterations:</p>
+<p>Output to the model goes through three globals. <code>text(value)</code> appends an <code>input_text</code> item to the cell's buffer; on yield or completion, Codex wraps the buffer as a single <code>custom_tool_call_output</code>. <code>image(item)</code> appends an image &mdash; from an HTTPS URL, a data URL, an object with <code>image_url</code>, or a raw MCP image block. <code>notify(value)</code> flushes a <code>custom_tool_call_output</code> immediately while the cell keeps running, so the model can react before the script finishes. Everything else &mdash; intermediate awaits, parsed JSON, half-built arrays &mdash; stays inside V8 and dies with the cell.</p>
 
-<div class="tbl-wrap">
-<table>
-<thead><tr><th>Path</th><th>Median</th><th>Mean</th><th>p95</th><th>What was measured</th></tr></thead>
-<tbody>
-<tr><td>Code Mode first cell</td><td>6.05 ms</td><td>&mdash;</td><td>&mdash;</td><td>First <code>execute</code>, including one-time V8 platform initialization.</td></tr>
-<tr><td>Code Mode empty cell</td><td>0.65 ms</td><td>0.73 ms</td><td>0.92 ms</td><td>Fresh isolate, fresh context, globals installed, empty JS module evaluated.</td></tr>
-<tr><td>Code Mode <code>text("ok")</code></td><td>0.67 ms</td><td>0.69 ms</td><td>0.88 ms</td><td>Same path, plus one buffered text output item.</td></tr>
-<tr><td>Bun <code>-e ""</code></td><td>4.69 ms</td><td>4.88 ms</td><td>5.91 ms</td><td>Spawn a new Bun process, evaluate an empty script, stdio discarded.</td></tr>
-<tr><td>Bun <code>console.log</code></td><td>10.65 ms</td><td>10.75 ms</td><td>11.83 ms</td><td>Spawn Bun, evaluate JS, write output to discarded stdout.</td></tr>
-</tbody>
-</table>
-</div>
-
-<p>Code Mode is already linked into Codex. A warm cell creates a new V8 isolate, installs a tiny global surface, evaluates a module, and exits in under a millisecond on this machine. Bun is a full runtime launched as a process. The useful comparison is the shape: Codex made JavaScript orchestration cheap enough to sit inside the agent loop.</p>
-
-<p>Tool calls inside the cell resolve to ordinary JavaScript values. Nothing reaches the model until the script calls <code>text()</code> or <code>image()</code>; on yield or completion, Codex wraps the accumulated buffer into a single <code>custom_tool_call_output</code>. <code>notify()</code> uses the same channel but flushes immediately while the cell keeps running. Everything else &mdash; intermediate awaits, parsed JSON, half-built arrays &mdash; stays inside V8 and dies with the cell.</p>
-
-<pre data-lang="TypeScript"><span class="c">// Tool outputs arrive as JavaScript values.</span>
+<pre data-lang="TypeScript"><span class="c">// Two shell calls in parallel; only the summary leaves the cell.</span>
 <span class="k">const</span> [diff, tests] = <span class="k">await</span> Promise.<span class="f">all</span>([
   tools.<span class="f">exec_command</span>({ cmd: <span class="s">"git diff --stat"</span>, max_output_tokens: <span class="n">4000</span> }),
   tools.<span class="f">exec_command</span>({
@@ -280,17 +261,15 @@
   }),
 ]);
 
-<span class="c">// Parse the noisy test payload inside the cell.</span>
 <span class="k">let</span> failures = [];
 <span class="k">try</span> {
   failures = JSON.<span class="f">parse</span>(tests.output).testResults
     .<span class="f">flatMap</span>((file) =&gt; file.assertionResults ?? [])
-    .<span class="f">filter</span>((test) =&gt; test.status === <span class="s">"failed"</span>)
-    .<span class="f">map</span>((test) =&gt; test.fullName)
+    .<span class="f">filter</span>((t) =&gt; t.status === <span class="s">"failed"</span>)
+    .<span class="f">map</span>((t) =&gt; t.fullName)
     .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">10</span>);
 } <span class="k">catch</span> {}
 
-<span class="c">// Only this JSON enters the tool-result buffer.</span>
 <span class="f">text</span>(JSON.<span class="f">stringify</span>({
   changed: diff.output.<span class="f">trim</span>(),
   failed_tests: failures,
@@ -299,279 +278,165 @@
 
 <div class="tbl-wrap">
 <table>
-<thead><tr><th>Global</th><th>What it does</th><th>Pattern in tests</th></tr></thead>
+<thead><tr><th>Global</th><th>What it does</th></tr></thead>
 <tbody>
-<tr><td><code>tools</code></td><td>Object of async functions, one per nested Codex tool. Calling one emits a runtime tool-call event; the turn worker runs the real tool and resolves the Promise.</td><td><code>tools.exec_command</code>, <code>tools.apply_patch</code>, <code>tools.mcp__rmcp__echo</code></td></tr>
-<tr><td><code>ALL_TOOLS</code></td><td>Runtime catalog of enabled nested tools as <code>{ name, description }</code>. The descriptions include the same generated TypeScript declarations Codex can show the model before it writes JavaScript.</td><td>Useful for metadata checks and deferred-tool edge cases, not the normal way to call a known tool.</td></tr>
-<tr><td><code>text</code></td><td>Adds an <code>input_text</code> item to the cell's buffered return value. When <code>exec</code> or <code>wait</code> responds, Codex wraps that buffer as <code>custom_tool_call_output</code>. That is what the model reads as the Code Mode tool result. It is not stdout and not a direct assistant message.</td><td><code>text({ json: true })</code> gives the agent model-visible tool output: <code>{"json":true}</code>.</td></tr>
-<tr><td><code>image</code></td><td>Appends image output from HTTP(S), data URLs, objects with <code>image_url</code>, or raw MCP image blocks.</td><td>Forward <code>view_image</code> and MCP image results.</td></tr>
-<tr><td><code>store/load</code></td><td>Store serializable JSON values under string keys and load them in later <code>exec</code> calls in the same session.</td><td>Store <code>{ title: "Notebook", items: [1, true, null] }</code>, load it next turn.</td></tr>
-<tr><td><code>notify</code></td><td>Sends a model-visible update immediately, before the final <code>exec</code> result. It stringifies like <code>text()</code>, but skips the cell buffer and injects a separate <code>custom_tool_call_output</code> while JavaScript keeps running.</td><td>The test emits <code>notify("code_mode_notify_marker")</code>, awaits another tool, then later emits <code>text("done")</code>.</td></tr>
-<tr><td><code>yield_control</code></td><td>Yields accumulated output now while the script keeps running.</td><td>Emit "phase 1", later resume with <code>wait</code>.</td></tr>
-<tr><td><code>exit</code></td><td>Stops the script successfully, like an early top-level return.</td><td><code>text("before"); exit(); text("after")</code> only emits "before".</td></tr>
+<tr><td><code>tools</code></td><td>Object of async functions, one per enabled nested Codex tool. Each call emits a runtime tool-call event; the turn worker runs the real tool and resolves the Promise with parsed JSON.</td></tr>
+<tr><td><code>ALL_TOOLS</code></td><td>Catalog of enabled nested tools as <code>{ name, description }</code>. Descriptions carry the same generated TypeScript declarations the model sees up front. Useful for deferred-tool catalogs.</td></tr>
+<tr><td><code>text</code></td><td>Appends an <code>input_text</code> output content item to the cell buffer. The buffer becomes one <code>custom_tool_call_output</code> when <code>exec</code> or <code>wait</code> responds.</td></tr>
+<tr><td><code>image</code></td><td>Appends an image output item. Accepts HTTPS URLs, data URLs, <code>{ image_url }</code> objects, and raw MCP image blocks.</td></tr>
+<tr><td><code>store</code> / <code>load</code></td><td>Read and write JSON-serializable values under string keys, scoped to the session. A later <code>exec</code> cell can <code>load</code> what an earlier one stored.</td></tr>
+<tr><td><code>notify</code></td><td>Flushes a separate <code>custom_tool_call_output</code> immediately, before the cell finishes. Skips the buffer.</td></tr>
+<tr><td><code>yield_control</code></td><td>Hands the buffered output back to the model now. The cell keeps running; subsequent <code>wait</code> calls receive new output.</td></tr>
+<tr><td><code>exit</code></td><td>Stops the script successfully, like an early top-level return.</td></tr>
 </tbody>
 </table>
 </div>
 
-<pre data-lang="TypeScript"><span class="c">// Flush a progress item before the local repro finishes.</span>
-<span class="f">notify</span>(<span class="s">"Found the relevant Slack context; running the local repro now."</span>);
+<pre data-lang="TypeScript"><span class="c">// From code_mode_notify_injects_additional_exec_tool_output_into_active_context.</span>
+<span class="c">// notify emits an immediate custom_tool_call_output for this exec call.</span>
+<span class="f">notify</span>(<span class="s">"code_mode_notify_marker"</span>);
 
-<span class="k">const</span> [threads, repro] = <span class="k">await</span> Promise.<span class="f">all</span>([
-  tools.<span class="f">slack_slack_search_public_and_private</span>({
-    query: <span class="s">'"Code Mode" "V8 isolate" after:2026-05-01'</span>,
-    limit: <span class="n">10</span>,
-    include_context: <span class="k">false</span>,
-  }),
-  tools.<span class="f">exec_command</span>({
-    cmd: <span class="s">"pnpm test codex-rs/core/tests/suite/code_mode.rs"</span>,
-    max_output_tokens: <span class="n">12000</span>,
-  }),
-]);
+<span class="c">// The cell keeps running after the notification is injected.</span>
+<span class="k">await</span> tools.<span class="f">test_sync_tool</span>({});
 
-<span class="c">// Final buffered result for this exec call.</span>
-<span class="f">text</span>(JSON.<span class="f">stringify</span>({
-  slack_hits: (threads.results ?? threads.matches ?? []).length,
-  repro_exit_code: repro.exit_code,
-  last_lines: repro.output.<span class="f">split</span>(<span class="s">"\n"</span>).<span class="f">slice</span>(-<span class="n">20</span>),
-}, <span class="k">null</span>, <span class="n">2</span>));</pre>
+<span class="c">// The normal buffered output still arrives when exec completes.</span>
+<span class="f">text</span>(<span class="s">"done"</span>);</pre>
 
-<h2><span>The TypeScript side</span>Types in the prompt, JavaScript in V8</h2>
+<h2><span>TypeScript in the prompt</span>JavaScript in V8</h2>
 
-<p>Code Mode uses TypeScript syntax as tool documentation for the model. In <code>code_mode_only</code>, Codex renders known nested tool schemas as TypeScript declarations inside the <code>exec</code> description. That gives the model the available <code>tools.*</code> names, argument shapes, and return shapes before it writes the cell.</p>
+<p>Code Mode uses TypeScript syntax as tool documentation, not as the execution language. For each enabled nested tool, <code>codex-rs/tools/src/code_mode.rs</code> renders its JSON Schema into a <code>declare const tools</code> block and appends it to the <code>exec</code> description. The model reads those declarations before it writes a cell, so it knows which <code>tools.*</code> functions exist and what arguments they take.</p>
 
-<pre data-lang="TypeScript"><span class="c">// Generated into the exec description before the model writes JS.</span>
+<pre data-lang="TypeScript"><span class="c">// Generated into the exec description from the MCP server's JSON Schema.</span>
 <span class="k">declare</span> <span class="k">const</span> tools: {
   <span class="f">mcp__rmcp__echo</span>(args: { env_var?: string; message: string; }):
     Promise&lt;CallToolResult&lt;{ echo: string; env: string | null; }&gt;&gt;;
 };
 
-<span class="c">// The cell itself is ordinary JavaScript.</span>
+<span class="c">// The cell itself is plain JavaScript; the declaration block is prompt text.</span>
 <span class="k">const</span> result = <span class="k">await</span> tools.<span class="f">mcp__rmcp__echo</span>({ message: <span class="s">"ping"</span> });
 <span class="f">text</span>(result.structuredContent?.echo ?? <span class="s">"missing"</span>);</pre>
 
-<p>At execution time the declaration block is gone. <code>exec</code> receives raw source, strips only the optional <code>// @exec:</code> pragma, and gives the remaining JavaScript module directly to V8. TypeScript-only syntax is invalid there. Tool argument validation happens when JavaScript calls a nested tool, because that call sends ordinary JSON back through Codex's tool runtime.</p>
+<p>At execution time, none of that TypeScript reaches V8. <code>execute_handler.rs</code> hands the raw source &mdash; minus the optional pragma &mdash; to <code>compile_module</code>. Type annotations, <code>declare</code> blocks, and other TypeScript-only syntax are invalid there. Argument validation happens later, when JavaScript calls a nested tool and the JSON payload goes through Codex's normal tool runtime.</p>
 
 <div class="tbl-wrap">
 <table>
-<thead><tr><th>Claim</th><th>Where I found it</th><th>What the source says</th></tr></thead>
+<thead><tr><th>Claim</th><th>Source</th></tr></thead>
 <tbody>
-<tr><td>Code Mode asks for raw JavaScript.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/description.rs#L12-L18">description.rs</a></td><td>The <code>exec</code> description says fresh V8 isolate, raw JavaScript, no Node, no filesystem, no network, no code fences.</td></tr>
-<tr><td>Tool types are generated declarations.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/description.rs#L371-L443">description.rs</a></td><td><code>render_code_mode_sample</code> appends an <code>exec tool declaration</code>; JSON Schema is rendered into TypeScript text.</td></tr>
-<tr><td>The model can see known nested tools before writing JS.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/tools/src/code_mode.rs#L61-L85">tools/src/code_mode.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/spec_plan.rs#L392-L425">spec_plan.rs</a></td><td>Codex collects enabled tool specs, excludes hidden/direct-model-only tools, and uses non-deferred tool definitions for the <code>code_mode_only</code> <code>exec</code> prompt.</td></tr>
-<tr><td>Execution sends JavaScript directly to V8.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/code_mode/execute_handler.rs#L36-L73">execute_handler.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/runtime/module_loader.rs#L9-L31">module_loader.rs</a></td><td>The handler parses raw source and passes <code>source</code> into the runtime; the runtime calls V8 <code>compile_module</code> directly.</td></tr>
-<tr><td><code>ALL_TOOLS</code> stores the same declaration text.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/tests/suite/code_mode.rs#L2623-L2699">code_mode.rs tests</a></td><td>Tests assert <code>view_image</code> and <code>mcp__rmcp__echo</code> metadata include exact <code>declare const tools</code> snippets.</td></tr>
+<tr><td><code>exec</code> takes raw JavaScript, no Node, no filesystem, no network.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/description.rs#L12-L18">description.rs</a></td></tr>
+<tr><td>TypeScript declarations are generated from JSON Schemas and appended to the description.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/description.rs#L371-L443">description.rs</a></td></tr>
+<tr><td>Known non-deferred tools are surfaced for the <code>code_mode_only</code> prompt.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/tools/src/code_mode.rs#L61-L85">tools/src/code_mode.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/spec_plan.rs#L392-L425">spec_plan.rs</a></td></tr>
+<tr><td>Submitted source is compiled with V8 <code>compile_module</code>.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/code_mode/execute_handler.rs#L36-L73">execute_handler.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/runtime/module_loader.rs#L9-L31">module_loader.rs</a></td></tr>
+<tr><td><code>ALL_TOOLS</code> exposes the same declaration text at runtime.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/tests/suite/code_mode.rs#L2623-L2699">core/tests/suite/code_mode.rs</a></td></tr>
 </tbody>
 </table>
 </div>
 
-<h2><span>Agent examples</span>Approved tools, local joins</h2>
+<h2><span>The benchmark</span>A warm cell is under a millisecond</h2>
 
-<p>The Bun version of this idea imports SDKs. Codex keeps the same orchestration shape but replaces imports with approved tool calls. JavaScript still does the join: fetch several sources, reduce them locally, return the small object.</p>
+<p>One local measurement on an Apple M1 Pro running Darwin 24.6.0, Bun 1.3.11, Codex at commit <code>a75c443</code>. Code Mode cells were driven through <code>CodeModeService::execute</code> in a release build; Bun was launched as a subprocess with stdio discarded. The warm paths ran for 1,000 iterations.</p>
 
-<p>For known tools, the model sees generated declarations before it writes the cell. The connector-style names below come from the current tool catalog, normalized into JavaScript identifiers.</p>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>Path</th><th>Median</th><th>Mean</th><th>p95</th><th>What was measured</th></tr></thead>
+<tbody>
+<tr><td>Code Mode first cell</td><td>6.05 ms</td><td>&mdash;</td><td>&mdash;</td><td>Single first <code>execute</code> after process start, including V8 platform init.</td></tr>
+<tr><td>Code Mode empty cell</td><td>0.65 ms</td><td>0.73 ms</td><td>0.92 ms</td><td>Fresh isolate and context, globals installed, empty module evaluated.</td></tr>
+<tr><td>Code Mode <code>text("ok")</code></td><td>0.67 ms</td><td>0.69 ms</td><td>0.88 ms</td><td>Same path, plus one buffered text output item.</td></tr>
+<tr><td>Bun <code>-e ""</code></td><td>4.69 ms</td><td>4.88 ms</td><td>5.91 ms</td><td>Spawn a new Bun process, evaluate an empty script.</td></tr>
+<tr><td>Bun <code>console.log</code></td><td>10.65 ms</td><td>10.75 ms</td><td>11.83 ms</td><td>Spawn Bun, evaluate JS, write to discarded stdout.</td></tr>
+</tbody>
+</table>
+</div>
 
-<pre data-lang="TypeScript"><span class="c">// Meeting prep: Calendar, Linear, Slack, Notion; one tiny return value.</span>
-<span class="k">const</span> [calendar, tickets, slack, notes] = <span class="k">await</span> Promise.<span class="f">all</span>([
-  tools.<span class="f">google_calendar_search_events</span>({
-    query: <span class="s">"Code Mode"</span>,
-    time_min: <span class="s">"2026-05-27T00:00:00Z"</span>,
-    time_max: <span class="s">"2026-05-28T00:00:00Z"</span>,
-    max_results: <span class="n">10</span>,
-  }),
-  tools.<span class="f">linear_list_issues</span>({
-    assignee: <span class="s">"me"</span>,
-    state: <span class="s">"active"</span>,
-    priority: <span class="n">2</span>,
-    limit: <span class="n">50</span>,
-    orderBy: <span class="s">"updatedAt"</span>,
-  }),
-  tools.<span class="f">slack_slack_search_public_and_private</span>({
-    query: <span class="s">'"Code Mode" "MCP" after:2026-05-01'</span>,
-    limit: <span class="n">20</span>,
-    include_context: <span class="k">false</span>,
-  }),
-  tools.<span class="f">notion_search</span>({
-    query: <span class="s">"Code Mode MCP launch notes"</span>,
-    query_type: <span class="s">"internal"</span>,
-    page_size: <span class="n">5</span>,
-    filters: {},
-  }),
-]);
+<p>A warm Code Mode cell creates an isolate, installs the global surface, evaluates a module, and tears down in under a millisecond on this machine. Bun is a full runtime launched as a subprocess. Codex made JavaScript orchestration cheap enough to sit inside the agent loop without a process spawn per cell.</p>
 
-<span class="c">// All the noisy result shapes stay inside the V8 cell.</span>
-<span class="k">const</span> meetings = (calendar.items ?? calendar.events ?? [])
-  .<span class="f">map</span>((event) =&gt; event.summary ?? event.title)
-  .<span class="f">filter</span>(Boolean);
+<h2><span>What the tests pin down</span>Concrete behavior</h2>
 
-<span class="k">const</span> highPriority = (tickets.issues ?? tickets.nodes ?? tickets.results ?? [])
-  .<span class="f">map</span>((issue) =&gt; issue.identifier ?? issue.title)
-  .<span class="f">filter</span>(Boolean)
-  .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">10</span>);
+<p>The behavior the project intends to preserve lives in <code>codex-rs/core/tests/suite/code_mode.rs</code>.</p>
 
-<span class="k">const</span> threads = (slack.results ?? slack.matches ?? [])
-  .<span class="f">map</span>((hit) =&gt; hit.permalink ?? hit.url ?? hit.text)
-  .<span class="f">filter</span>(Boolean)
-  .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">5</span>);
+<p><strong>Nested tools are async functions.</strong> Even when only <code>exec</code> and <code>wait</code> are visible to the model, registered tools remain callable from JavaScript.</p>
 
-<span class="k">const</span> docs = (notes.results ?? [])
-  .<span class="f">map</span>((page) =&gt; page.title ?? page.url)
-  .<span class="f">filter</span>(Boolean);
-
-<span class="c">// The model gets the brief, not every calendar event and Slack hit.</span>
-<span class="f">text</span>(JSON.<span class="f">stringify</span>({
-  meetings,
-  high_priority_tickets: highPriority,
-  threads,
-  docs,
-}, <span class="k">null</span>, <span class="n">2</span>));</pre>
-
-<p>The JavaScript has no direct network. It can only ask approved tools to do work, then reduce the returned objects before calling <code>text()</code>.</p>
-
-<pre data-lang="TypeScript"><span class="c">// Spreadsheet triage: large table in, small action list out.</span>
-<span class="k">const</span> [sheet, discussion] = <span class="k">await</span> Promise.<span class="f">all</span>([
-  tools.<span class="f">google_drive_search_spreadsheet_rows</span>({
-    spreadsheet_id: <span class="s">"roadmap-sheet-id"</span>,
-    sheet_name: <span class="s">"Risks"</span>,
-    query: <span class="s">"open"</span>,
-    start_row: <span class="n">1</span>,
-    end_row: <span class="n">500</span>,
-    start_column: <span class="s">"A"</span>,
-    end_column: <span class="s">"H"</span>,
-    max_matching_rows: <span class="n">100</span>,
-  }),
-  tools.<span class="f">slack_slack_search_public_and_private</span>({
-    query: <span class="s">'"release risk" after:2026-05-01'</span>,
-    limit: <span class="n">20</span>,
-    include_context: <span class="k">false</span>,
-  }),
-]);
-
-<span class="k">const</span> rows = sheet.rows ?? sheet.matches ?? [];
-<span class="k">const</span> blockers = rows
-  .<span class="f">filter</span>((row) =&gt; /blocked|critical|at risk/i.<span class="f">test</span>(JSON.<span class="f">stringify</span>(row)))
-  .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">10</span>);
-
-<span class="k">const</span> links = (discussion.results ?? discussion.matches ?? [])
-  .<span class="f">map</span>((hit) =&gt; hit.permalink ?? hit.url)
-  .<span class="f">filter</span>(Boolean)
-  .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">5</span>);
-
-<span class="f">text</span>(JSON.<span class="f">stringify</span>({
-  blocker_count: blockers.length,
-  blockers,
-  related_slack_threads: links,
-}, <span class="k">null</span>, <span class="n">2</span>));</pre>
-
-<h2><span>Actual tests</span>The repo patterns are concrete</h2>
-
-<p>The repo tests live in <code>codex-rs/core/tests/suite/code_mode.rs</code>. They are the clearest map of the behavior OpenAI intends to preserve.</p>
-
-<p><strong>1. Nested tools are normal async functions.</strong> Even in <code>code_mode_only</code>, where the top-level model prompt only lists <code>exec</code> and <code>wait</code>, JavaScript can still call registered nested tools.</p>
-
-<pre data-lang="TypeScript"><span class="c">// From code_mode_only_can_call_nested_tools</span>
-<span class="c">// Call an ordinary Codex tool from inside the V8 cell.</span>
+<pre data-lang="TypeScript"><span class="c">// code_mode_only_can_call_nested_tools</span>
 <span class="k">const</span> output = <span class="k">await</span> tools.<span class="f">exec_command</span>({
-  cmd: <span class="s">"printf code_mode_only_nested_tool_marker"</span>
+  cmd: <span class="s">"printf code_mode_only_nested_tool_marker"</span>,
 });
-
-<span class="c">// Return only the useful command output to the agent.</span>
 <span class="f">text</span>(output.output);</pre>
 
-<p>The shell command is just another awaited function inside the cell.</p>
+<p><strong>Nested calls run in parallel.</strong> A barrier-and-delay pair proves the two tool calls are not serialized.</p>
 
-<p><strong>2. Nested tool calls can run in parallel.</strong> The test uses a barrier and two delayed tools, then asserts the total wall time is short enough to prove they were not serialized.</p>
-
-<pre data-lang="TypeScript"><span class="c">// From code_mode_nested_tool_calls_can_run_in_parallel</span>
+<pre data-lang="TypeScript"><span class="c">// code_mode_nested_tool_calls_can_run_in_parallel</span>
 <span class="k">const</span> args = {
   sleep_after_ms: <span class="n">300</span>,
-  barrier: {
-    id: <span class="s">"code-mode-parallel-tools"</span>,
-    participants: <span class="n">2</span>,
-    timeout_ms: <span class="n">1000</span>,
-  },
+  barrier: { id: <span class="s">"code-mode-parallel-tools"</span>, participants: <span class="n">2</span>, timeout_ms: <span class="n">1000</span> },
 };
 
-<span class="c">// Start both nested tool calls at the same time.</span>
 <span class="k">const</span> results = <span class="k">await</span> Promise.<span class="f">all</span>([
   tools.<span class="f">test_sync_tool</span>(args),
   tools.<span class="f">test_sync_tool</span>(args),
 ]);
 
-<span class="c">// Send the combined result back as one exec output.</span>
 <span class="f">text</span>(JSON.<span class="f">stringify</span>(results));</pre>
 
-<p><strong>3. Long-running cells yield and resume.</strong> <code>exec</code> can return before the JavaScript finishes. The model gets a cell id, then calls <code>wait</code> later. The test verifies that the first response includes "phase 1", the second wait returns only "phase 2", and the final wait returns "phase 3" with <code>Script completed</code>.</p>
+<p><strong>Long-running cells yield and resume.</strong> <code>exec</code> returns "phase 1" and a cell id; a later <code>wait</code> receives only "phase 2" and "phase 3" with <code>Script completed</code>.</p>
 
-<pre data-lang="TypeScript"><span class="c">// From code_mode_can_yield_and_resume_with_wait</span>
-<span class="c">// Emit phase 1 as tool output now.</span>
+<pre data-lang="TypeScript"><span class="c">// code_mode_can_yield_and_resume_with_wait</span>
 <span class="f">text</span>(<span class="s">"phase 1"</span>);
-
-<span class="c">// Return control to the model while the JS cell stays alive.</span>
 <span class="f">yield_control</span>();
-
-<span class="c">// Later wait calls receive only output emitted after the yield.</span>
 <span class="f">text</span>(<span class="s">"phase 2"</span>);
 <span class="f">text</span>(<span class="s">"phase 3"</span>);</pre>
 
-<pre data-lang="Shell"><span class="c"># The model-facing wait call is JSON, not JavaScript</span>
+<pre data-lang="Shell"><span class="c"># The wait call from the model is a normal function tool, not JavaScript.</span>
 wait {
   <span class="s">"cell_id"</span>: <span class="s">"1"</span>,
   <span class="s">"yield_time_ms"</span>: 1000
 }</pre>
 
-<p><strong>4. Small state can cross turns.</strong> Session-local JSON, not a database. Enough for a later <code>exec</code> cell to reuse a small object.</p>
+<p><strong>State crosses turns.</strong> <code>store</code> and <code>load</code> persist JSON values across <code>exec</code> calls in the same session.</p>
 
-<pre data-lang="TypeScript"><span class="c">// First exec call: keep JSON state inside Code Mode's session store.</span>
+<pre data-lang="TypeScript"><span class="c">// Turn N: save a small JSON value under "nb".</span>
 <span class="f">store</span>(<span class="s">"nb"</span>, { title: <span class="s">"Notebook"</span>, items: [<span class="n">1</span>, <span class="k">true</span>, <span class="n">null</span>] });
-
-<span class="c">// Return a tiny acknowledgement to the model.</span>
 <span class="f">text</span>(<span class="s">"stored"</span>);
 
-<span class="c">// Later exec call: load the state and explicitly return it.</span>
+<span class="c">// Turn N+1: load and return it.</span>
 <span class="f">text</span>(JSON.<span class="f">stringify</span>(<span class="f">load</span>(<span class="s">"nb"</span>)));</pre>
 
-<p><strong>5. Deferred tools remain callable.</strong> Codex can omit some deferred app or MCP tools from the printed <code>exec</code> description while keeping them callable and listed in <code>ALL_TOOLS</code>. The runtime can handle dynamic catalogs.</p>
+<p><strong>Deferred tools stay callable.</strong> Codex can omit some deferred app or MCP tools from the printed <code>exec</code> description while keeping them callable and listed in <code>ALL_TOOLS</code>.</p>
 
-<h2><span>MCP</span>How Code Mode connects to MCP</h2>
+<h2><span>MCP</span>One Codex tool per MCP tool</h2>
 
-<p>The tests register an RMCP server and expose its tools directly on <code>tools</code>. A namespaced MCP tool such as <code>rmcp.echo</code> becomes <code>tools.mcp__rmcp__echo</code>. If the raw tool name contains illegal JavaScript identifier characters, Codex normalizes them to underscores; the raw server and tool names are still used for the MCP call.</p>
-
-<p>Cloudflare and Anthropic describe the server-side variant: expose a small code execution surface instead of hundreds of direct tools. Codex puts that same idea inside the client harness.</p>
+<p>Each MCP tool exposed to Codex becomes a function on <code>tools</code>. A namespaced MCP tool such as <code>rmcp.echo</code> becomes <code>tools.mcp__rmcp__echo</code>; characters that are invalid in JavaScript identifiers are normalized to underscores, while the raw server and tool names go out over the wire. The Promise resolves to the MCP <code>CallToolResult</code> directly: <code>content</code>, <code>structuredContent</code>, and <code>isError</code> are inspectable JavaScript objects.</p>
 
 <div class="tbl-wrap">
 <table>
-<thead><tr><th>Pattern</th><th>Where code runs</th><th>Why it helps</th></tr></thead>
+<thead><tr><th>Pattern</th><th>Where the code runs</th><th>Effect</th></tr></thead>
 <tbody>
-<tr><td>Codex Code Mode</td><td>Inside the Codex harness, in a constrained V8 runtime.</td><td>Lets the model compose normal Codex tools with JavaScript.</td></tr>
-<tr><td>Cloudflare Code Mode</td><td>Inside the MCP server's sandbox.</td><td>Collapses large APIs into a small typed execution surface.</td></tr>
-<tr><td>Anthropic MCP execution</td><td>Inside a code execution environment around MCP.</td><td>Filters intermediate results before they hit model context.</td></tr>
+<tr><td>Codex Code Mode</td><td>Inside the Codex harness, in a constrained V8 isolate.</td><td>Composes Codex's existing tools with JavaScript orchestration.</td></tr>
+<tr><td>Cloudflare Code Mode</td><td>Inside the MCP server's sandbox.</td><td>Collapses a large API into a small typed execution surface.</td></tr>
+<tr><td>Anthropic MCP execution</td><td>Inside a code-execution environment around MCP.</td><td>Filters intermediate results before they hit model context.</td></tr>
 </tbody>
 </table>
 </div>
 
-<pre data-lang="TypeScript"><span class="c">// From code_mode_can_print_structured_mcp_tool_result_fields</span>
-<span class="c">// Call the real MCP tool as a nested JavaScript function.</span>
+<pre data-lang="TypeScript"><span class="c">// code_mode_can_print_structured_mcp_tool_result_fields</span>
 <span class="k">const</span> { content, structuredContent, isError } =
   <span class="k">await</span> tools.<span class="f">mcp__rmcp__echo</span>({ message: <span class="s">"ping"</span> });
 
-<span class="c">// Reduce the MCP result into a tiny model-visible summary.</span>
 <span class="f">text</span>(
   <span class="s">`echo=${structuredContent?.echo ?? "missing"}\n`</span> +
     <span class="s">`isError=${String(isError)}\n`</span> +
     <span class="s">`contentLength=${content.length}`</span>
 );</pre>
 
-<pre data-lang="TypeScript"><span class="c">// From code_mode_can_use_mcp_image_result_with_image_helper</span>
-<span class="c">// MCP image blocks can be forwarded as image output to the agent.</span>
+<pre data-lang="TypeScript"><span class="c">// code_mode_can_use_mcp_image_result_with_image_helper</span>
 <span class="k">const</span> out = <span class="k">await</span> tools.<span class="f">mcp__rmcp__image_scenario</span>({
   scenario: <span class="s">"image_only_original_detail"</span>,
 });
 
+<span class="c">// Forward an MCP image block as image output to the agent.</span>
 <span class="k">const</span> imageItem = out.content.<span class="f">find</span>((item) =&gt; item.type === <span class="s">"image"</span>);
 <span class="f">image</span>(imageItem);</pre>
 
-<pre data-lang="TypeScript"><span class="c">// From code_mode_can_print_error_mcp_tool_result_fields</span>
-<span class="c">// Tool errors are data the JS cell can inspect before summarizing.</span>
+<pre data-lang="TypeScript"><span class="c">// code_mode_can_print_error_mcp_tool_result_fields</span>
 <span class="k">const</span> bad = <span class="k">await</span> tools.<span class="f">mcp__rmcp__echo</span>({});
 <span class="k">const</span> firstText = bad.content[<span class="n">0</span>]?.text ?? <span class="s">""</span>;
 
@@ -583,7 +448,13 @@ wait {
     firstText.<span class="f">includes</span>(<span class="s">"message"</span>),
 }, <span class="k">null</span>, <span class="n">2</span>));</pre>
 
-<p>Code Mode can inspect MCP <code>content</code>, <code>structuredContent</code>, and <code>isError</code> before returning anything. The tests cover text-only results, structured results, image blocks passed through <code>image()</code>, error summaries, and <code>code_mode_only</code> calling MCP tools when only <code>exec</code> and <code>wait</code> were visible at the top level.</p>
+<p>The cell inspects <code>content</code>, <code>structuredContent</code>, and <code>isError</code> before deciding what reaches the model. The same set of tests covers text-only results, structured results, image forwarding through <code>image()</code>, error summaries, and <code>code_mode_only</code> reaching MCP tools that were never surfaced at the top level.</p>
+
+<h2><span>The shape</span>Where this fits the Bun argument</h2>
+
+<p><a href="https://kasperpeulen.github.io/blog/">The Bun post</a> argued that JavaScript would become the agent shell: agent writes a script, runtime holds the intermediate results, only the selected output goes back to the model. Codex implements that with in-process V8 isolates and a Rust harness. No subprocess per cell, no Node, no <code>npm install</code> step, no shared filesystem &mdash; just a small, sandboxed JS surface that calls Codex's existing tools.</p>
+
+<p>The Bun argument turned on owning the runtime. Codex shows another route: own the harness, embed V8 directly, and the agent loop never has to spawn a process to run JavaScript.</p>
 
 <div class="sep">&middot;&middot;&middot;</div>
 
