@@ -236,6 +236,56 @@
 </table>
 </div>
 
+<h2><span>The loop</span>What an agent actually sends</h2>
+
+<p>The top-level model does not call <code>tools.exec</code>. It sends JavaScript as the body of the freeform <code>exec</code> tool. Inside that JavaScript, <code>tools.*</code> refers to nested Codex tools such as shell, MCP, browser, or app connectors.</p>
+
+<pre data-lang="exec input"><span class="c">// This whole block is the raw input to the top-level exec tool.</span>
+<span class="c">// The pragma asks Codex to yield after 1s if the cell is still running.</span>
+<span class="c">// @exec: {"yield_time_ms": 1000, "max_output_tokens": 4000}</span>
+
+<span class="f">text</span>(<span class="s">"phase 1: starting tests"</span>);
+<span class="f">yield_control</span>();
+
+<span class="k">const</span> result = <span class="k">await</span> tools.<span class="f">exec_command</span>({
+  cmd: <span class="s">"pnpm test -- --reporter=json"</span>,
+  max_output_tokens: <span class="n">40000</span>,
+});
+
+<span class="f">text</span>(JSON.<span class="f">stringify</span>({
+  exit_code: result.exit_code,
+  last_lines: result.output.<span class="f">split</span>(<span class="s">"\n"</span>).<span class="f">slice</span>(-<span class="n">20</span>),
+}, <span class="k">null</span>, <span class="n">2</span>));</pre>
+
+<p>If the cell yields before it finishes, Codex returns a normal tool result with the cell id and whatever was buffered so far.</p>
+
+<pre data-lang="exec result">Script running with cell ID 1
+Wall time 1.0 seconds
+Output:
+phase 1: starting tests</pre>
+
+<p>The next model step is a <code>wait</code> function call. Unlike <code>exec</code>, <code>wait</code> is JSON-shaped.</p>
+
+<pre data-lang="wait call">{
+  <span class="s">"cell_id"</span>: <span class="s">"1"</span>,
+  <span class="s">"yield_time_ms"</span>: <span class="n">1000</span>
+}</pre>
+
+<p><code>wait</code> returns only new output since the previous yield. If the script is still running, it returns the same cell id and the model can wait again. If it finished, the cell closes.</p>
+
+<pre data-lang="wait result">Script completed
+Wall time 2.4 seconds
+Output:
+{
+  "exit_code": 0,
+  "last_lines": [
+    "Test Files 12 passed",
+    "Tests 148 passed"
+  ]
+}</pre>
+
+<p>For a runaway cell, the model sends the same JSON with <code>"terminate": true</code>. The tests assert that termination returns <code>Script terminated</code> and that later <code>exec</code> calls still work.</p>
+
 <h2><span>The runtime</span>A V8 cell between the model and tools</h2>
 
 <p>The implementation splits across three locations. <code>codex-rs/code-mode</code> owns the V8 runtime: globals, cell lifecycle, waits, timers, image and text buffering, the session store. <code>codex-rs/core/src/tools/code_mode</code> wires that runtime into the Codex tool system. <code>codex-rs/tools/src/code_mode.rs</code> converts ordinary tool specs into nested JavaScript functions and renders their JSON Schemas as TypeScript declarations.</p>
