@@ -219,16 +219,11 @@
 
 <h2><span>The starting point</span>A hidden switch in the harness</h2>
 
-<p>After writing <a href="https://kasperpeulen.github.io/blog/">about Bun becoming an agent shell</a>, I wanted to know whether OpenAI was moving in the same direction. The answer is yes, but not with Bun. The open-source Codex harness has its own JavaScript execution path built on in-process V8 isolates.</p>
+<p>Codex ships its own JavaScript execution path. It runs in in-process V8 isolates, not Bun. The shape is still the one from <a href="https://kasperpeulen.github.io/blog/">the Bun post</a>: the agent writes a small program, the runtime holds the intermediate results, and only the selected output goes back into model context.</p>
 
-<p>The feature registry contains two under-development flags: <code>code_mode</code> and <code>code_mode_only</code>. On my installed <code>codex-cli 0.134.0</code>, both are off by default. Enabling <code>code_mode_only</code> automatically enables <code>code_mode</code> too.</p>
+<p>The feature registry contains two under-development flags: <code>code_mode</code> and <code>code_mode_only</code>. On my installed <code>codex-cli 0.134.0</code>, both are off by default. Enabling <code>code_mode_only</code> also enables <code>code_mode</code>.</p>
 
-<blockquote>
-  The idea is the same as the Bun post: JavaScript is becoming the new shell for agents. Codex just reaches for V8 isolates instead of Bun.
-  <span class="at">&mdash; My read of <a href="https://github.com/openai/codex/tree/main/codex-rs/code-mode">codex-rs/code-mode</a></span>
-</blockquote>
-
-<p>The public tool names are deliberately boring: <code>exec</code> and <code>wait</code>. They are not boring internally. <code>exec</code> is a freeform tool: the model sends raw JavaScript source text, not JSON and not a markdown code fence. Codex parses an optional first-line pragma, allocates a cell id, starts a fresh V8 isolate, evaluates the source as an async module, and returns either a completed result or a "Script running with cell ID ..." header.</p>
+<p>The model sees two public tools: <code>exec</code> and <code>wait</code>. <code>exec</code> is a freeform tool: the model sends raw JavaScript source text, not JSON and not a markdown code fence. Codex parses an optional first-line pragma, allocates a cell id, starts a fresh V8 isolate, evaluates the source as an async module, and returns either a completed result or a "Script running with cell ID ..." header.</p>
 
 <p><code>wait</code> is the companion function tool. It takes a <code>cell_id</code>, waits for new output from that already-running isolate, optionally truncates the returned output with <code>max_tokens</code>, and can terminate the cell with <code>terminate: true</code>. The tests prove that one turn can start a cell, later turns can wait on it, multiple cells can be alive at once, and termination does not poison later <code>exec</code> calls.</p>
 
@@ -255,9 +250,9 @@
   <div class="stack-l">Codex runs the real shell, MCP, browser, app, or workspace tool</div>
 </div>
 
-<p>The sandbox is small on purpose. The runtime deletes <code>console</code>, <code>Atomics</code>, <code>SharedArrayBuffer</code>, and <code>WebAssembly</code>. Module imports are unsupported. There is no Node, no direct filesystem, and no direct network. If the script wants power, it has to ask a Codex tool for it.</p>
+<p>The runtime deletes <code>console</code>, <code>Atomics</code>, <code>SharedArrayBuffer</code>, and <code>WebAssembly</code>. Module imports are unsupported. There is no Node, no direct filesystem, and no direct network. If the script wants power, it has to ask a Codex tool for it.</p>
 
-<p>It is also lean in the boring, measurable sense. I did not find a startup benchmark in the repo, so I wrote a temporary local benchmark against <code>CodeModeService::execute</code>. This is not "Codex CLI versus Bun." It is narrower: warmed in-process Code Mode cells versus spawning <code>bun -e</code> as a new process. On my Apple M1 Pro, macOS Darwin 24.6.0, Bun <code>1.3.11</code>, release build of Codex at <code>a75c443</code>, 1,000 iterations after warmup:</p>
+<p>I did not find a startup benchmark in the repo, so I measured the path Code Mode actually uses: <code>CodeModeService::execute</code> in a release build, after warmup, against <code>bun -e</code> process startup. Same machine, Apple M1 Pro, macOS Darwin 24.6.0, Bun <code>1.3.11</code>, Codex <code>a75c443</code>, 1,000 iterations:</p>
 
 <div class="tbl-wrap">
 <table>
@@ -272,11 +267,11 @@
 </table>
 </div>
 
-<p>The takeaway is not that V8 "beats Bun" in general. Bun is a full runtime and process. Code Mode is an already-linked V8 engine inside Codex, spinning up a tiny isolate with no Node, no imports, and a handful of globals. That is exactly why it fits the agent-shell idea: JavaScript orchestration can be cheaper than a tool round trip through a separate process.</p>
+<p>Code Mode is already linked into Codex. A warm cell creates a new V8 isolate, installs a tiny global surface, evaluates a module, and exits in under a millisecond on this machine. Bun is a full runtime launched as a process. The useful comparison is the shape: Codex made JavaScript orchestration cheap enough to sit inside the agent loop.</p>
 
-<p>The important practical detail is the return channel. A Code Mode script can call tools, branch, filter, and keep intermediate results private inside V8. The model does not automatically see all of that. The model sees what the script gives back through <code>text()</code> or <code>image()</code> when <code>exec</code> or <code>wait</code> yields or completes. In other words, <code>text()</code> is closer to "return this to the agent" than "print this to the user."</p>
+<p>Tool calls inside the cell resolve to ordinary JavaScript values. Nothing reaches the model until the script calls <code>text()</code> or <code>image()</code>; on yield or completion, Codex wraps the accumulated buffer into a single <code>custom_tool_call_output</code>. <code>notify()</code> uses the same channel but flushes immediately while the cell keeps running. Everything else &mdash; intermediate awaits, parsed JSON, half-built arrays &mdash; stays inside V8 and dies with the cell.</p>
 
-<pre data-lang="TypeScript"><span class="c">// Awaiting tools gives the output to JavaScript, not directly to the model.</span>
+<pre data-lang="TypeScript"><span class="c">// Tool outputs arrive as JavaScript values.</span>
 <span class="k">const</span> [diff, tests] = <span class="k">await</span> Promise.<span class="f">all</span>([
   tools.<span class="f">exec_command</span>({ cmd: <span class="s">"git diff --stat"</span>, max_output_tokens: <span class="n">4000</span> }),
   tools.<span class="f">exec_command</span>({
@@ -285,7 +280,7 @@
   }),
 ]);
 
-<span class="c">// The script can parse, filter, and summarize a noisy test payload locally.</span>
+<span class="c">// Parse the noisy test payload inside the cell.</span>
 <span class="k">let</span> failures = [];
 <span class="k">try</span> {
   failures = JSON.<span class="f">parse</span>(tests.output).testResults
@@ -295,7 +290,7 @@
     .<span class="f">slice</span>(<span class="n">0</span>, <span class="n">10</span>);
 } <span class="k">catch</span> {}
 
-<span class="c">// text(...) is the return channel back to the agent/model.</span>
+<span class="c">// Only this JSON enters the tool-result buffer.</span>
 <span class="f">text</span>(JSON.<span class="f">stringify</span>({
   changed: diff.output.<span class="f">trim</span>(),
   failed_tests: failures,
@@ -318,7 +313,7 @@
 </table>
 </div>
 
-<pre data-lang="TypeScript"><span class="c">// notify(...) is an early update to the model while JS keeps running.</span>
+<pre data-lang="TypeScript"><span class="c">// Flush a progress item before the local repro finishes.</span>
 <span class="f">notify</span>(<span class="s">"Found the relevant Slack context; running the local repro now."</span>);
 
 <span class="k">const</span> [threads, repro] = <span class="k">await</span> Promise.<span class="f">all</span>([
@@ -333,7 +328,7 @@
   }),
 ]);
 
-<span class="c">// text(...) is the final payload the model gets from this exec call.</span>
+<span class="c">// Final buffered result for this exec call.</span>
 <span class="f">text</span>(JSON.<span class="f">stringify</span>({
   slack_hits: (threads.results ?? threads.matches ?? []).length,
   repro_exit_code: repro.exit_code,
@@ -342,7 +337,7 @@
 
 <h2><span>The TypeScript side</span>Declarations, not <code>tsc</code></h2>
 
-<p>There are two different layers here. The prompt surface can be TypeScript-shaped: in <code>code_mode_only</code>, Codex renders known nested tool schemas as TypeScript declarations in the <code>exec</code> description so the model knows how to call <code>tools.*</code>. The runtime surface is JavaScript-only: <code>exec</code> accepts raw JavaScript, strips only the optional <code>// @exec:</code> pragma, and sends the remaining source to V8 as a module.</p>
+<p>The prompt can be TypeScript-shaped. In <code>code_mode_only</code>, Codex renders known nested tool schemas as TypeScript declarations in the <code>exec</code> description so the model knows how to call <code>tools.*</code>. The runtime is JavaScript-only: <code>exec</code> accepts raw JavaScript, strips only the optional <code>// @exec:</code> pragma, and sends the remaining source to V8 as a module.</p>
 
 <pre data-lang="TypeScript"><span class="c">// Generated into the exec description before the model writes JS.</span>
 <span class="k">declare</span> <span class="k">const</span> tools: {
@@ -354,7 +349,7 @@
 <span class="k">const</span> result = <span class="k">await</span> tools.<span class="f">mcp__rmcp__echo</span>({ message: <span class="s">"ping"</span> });
 <span class="f">text</span>(result.structuredContent?.echo ?? <span class="s">"missing"</span>);</pre>
 
-<p>I did not find a TypeScript compiler, transpiler, or <code>tsc</code> validation step in the Code Mode execution path. That matters. The generated <code>declare const tools</code> block is a prompt/type hint, not code that runs. If the model sends TypeScript-only syntax to <code>exec</code>, V8 sees it as JavaScript source and the cell fails at runtime. Tool argument errors are runtime tool errors, not static type errors.</p>
+<p>I did not find a TypeScript compiler, transpiler, or <code>tsc</code> validation step in the execution path. The generated <code>declare const tools</code> block is prompt text. If the model sends TypeScript-only syntax to <code>exec</code>, V8 rejects it at runtime. Tool argument errors are runtime tool errors, not static type errors.</p>
 
 <div class="tbl-wrap">
 <table>
@@ -369,11 +364,11 @@
 </table>
 </div>
 
-<h2><span>Agent examples</span>The old Bun scripts in Codex clothes</h2>
+<h2><span>Agent examples</span>Approved tools, local joins</h2>
 
-<p>The old Bun post had more interesting examples because it showed whole workflows: calendar, Slack, Linear, sheets, local filtering, one-line output. Code Mode wants the same shape, with one important difference. Bun can import SDKs. Codex's V8 cell cannot import anything. It composes the tools Codex already approved and described to the model.</p>
+<p>The Bun version of this idea imports SDKs. Codex keeps the same orchestration shape but replaces imports with approved tool calls. JavaScript still does the join: fetch several sources, reduce them locally, return the small object.</p>
 
-<p>So the normal path is not "search <code>ALL_TOOLS</code> and hope." The model should already have generated declarations for known tools before it writes JavaScript. The examples below use connector-style names from the current tool catalog, normalized into JavaScript identifiers.</p>
+<p>For known tools, the model sees generated declarations before it writes the cell. The connector-style names below come from the current tool catalog, normalized into JavaScript identifiers.</p>
 
 <pre data-lang="TypeScript"><span class="c">// Meeting prep: Calendar, Linear, Slack, Notion; one tiny return value.</span>
 <span class="k">const</span> [calendar, tickets, slack, notes] = <span class="k">await</span> Promise.<span class="f">all</span>([
@@ -430,7 +425,7 @@
   docs,
 }, <span class="k">null</span>, <span class="n">2</span>));</pre>
 
-<p>That is basically the old Calendar + Linear + Slack + notes example, but with Codex's security boundary preserved. The JavaScript has no direct network. It can only ask approved tools to do work, then reduce the returned objects before calling <code>text()</code>.</p>
+<p>The JavaScript has no direct network. It can only ask approved tools to do work, then reduce the returned objects before calling <code>text()</code>.</p>
 
 <pre data-lang="TypeScript"><span class="c">// Spreadsheet triage: large table in, small action list out.</span>
 <span class="k">const</span> [sheet, discussion] = <span class="k">await</span> Promise.<span class="f">all</span>([
@@ -469,7 +464,7 @@
 
 <h2><span>Actual tests</span>The repo patterns are concrete</h2>
 
-<p>The examples above are the practical shape. The proof is lower-level and lives in <code>codex-rs/core/tests/suite/code_mode.rs</code>. Those tests show what Code Mode actually guarantees.</p>
+<p>The repo tests live in <code>codex-rs/core/tests/suite/code_mode.rs</code>. They are the clearest map of the behavior OpenAI intends to preserve.</p>
 
 <p><strong>1. Nested tools are normal async functions.</strong> Even in <code>code_mode_only</code>, where the top-level model prompt only lists <code>exec</code> and <code>wait</code>, JavaScript can still call registered nested tools.</p>
 
@@ -482,7 +477,7 @@
 <span class="c">// Return only the useful command output to the agent.</span>
 <span class="f">text</span>(output.output);</pre>
 
-<p>That is the shell replacement shape in miniature. The agent writes JavaScript; the shell command is demoted to one tool call inside the script.</p>
+<p>The shell command is just another awaited function inside the cell.</p>
 
 <p><strong>2. Nested tool calls can run in parallel.</strong> The test uses a barrier and two delayed tools, then asserts the total wall time is short enough to prove they were not serialized.</p>
 
@@ -524,7 +519,7 @@ wait {
   <span class="s">"yield_time_ms"</span>: 1000
 }</pre>
 
-<p><strong>4. Small state can cross turns.</strong> This is not a durable database. It is session-local JSON state. But it is enough for an agent to save a small object from one <code>exec</code> cell and reuse it in a later one.</p>
+<p><strong>4. Small state can cross turns.</strong> Session-local JSON, not a database. Enough for a later <code>exec</code> cell to reuse a small object.</p>
 
 <pre data-lang="TypeScript"><span class="c">// First exec call: keep JSON state inside Code Mode's session store.</span>
 <span class="f">store</span>(<span class="s">"nb"</span>, { title: <span class="s">"Notebook"</span>, items: [<span class="n">1</span>, <span class="k">true</span>, <span class="n">null</span>] });
@@ -535,13 +530,13 @@ wait {
 <span class="c">// Later exec call: load the state and explicitly return it.</span>
 <span class="f">text</span>(JSON.<span class="f">stringify</span>(<span class="f">load</span>(<span class="s">"nb"</span>)));</pre>
 
-<p><strong>5. Deferred tools are an edge case, not the main workflow.</strong> Codex can omit some deferred app or MCP tools from the printed <code>exec</code> description while keeping them callable and listed in <code>ALL_TOOLS</code>. That proves the runtime can handle dynamic catalogs. It does not mean normal agent code should discover every tool by string search at execution time.</p>
+<p><strong>5. Deferred tools remain callable.</strong> Codex can omit some deferred app or MCP tools from the printed <code>exec</code> description while keeping them callable and listed in <code>ALL_TOOLS</code>. The runtime can handle dynamic catalogs.</p>
 
 <h2><span>MCP</span>How Code Mode connects to MCP</h2>
 
-<p>In the Codex repo, MCP is not a hypothetical wrapper example. The tests register an RMCP server and prove that its tools appear directly on <code>tools</code>. A namespaced MCP tool such as <code>rmcp.echo</code> becomes <code>tools.mcp__rmcp__echo</code>. If the raw tool name contains illegal JavaScript identifier characters, Codex normalizes them to underscores. Underneath, the raw server and tool names are preserved for the actual MCP call.</p>
+<p>The tests register an RMCP server and expose its tools directly on <code>tools</code>. A namespaced MCP tool such as <code>rmcp.echo</code> becomes <code>tools.mcp__rmcp__echo</code>. If the raw tool name contains illegal JavaScript identifier characters, Codex normalizes them to underscores; the raw server and tool names are still used for the MCP call.</p>
 
-<p>Cloudflare and Anthropic describe the server-side version. Instead of exposing hundreds or thousands of MCP tools directly, the MCP server exposes a tiny code execution surface. The agent writes TypeScript against a typed API, and the server executes it inside a sandbox. Cloudflare says this lets agents handle much larger APIs with a fixed prompt footprint.</p>
+<p>Cloudflare and Anthropic describe the server-side variant: expose a small code execution surface instead of hundreds of direct tools. Codex puts that same idea inside the client harness.</p>
 
 <div class="tbl-wrap">
 <table>
@@ -588,7 +583,7 @@ wait {
     firstText.<span class="f">includes</span>(<span class="s">"message"</span>),
 }, <span class="k">null</span>, <span class="n">2</span>));</pre>
 
-<p>The important bit is the result shape. Code Mode can inspect MCP <code>content</code>, <code>structuredContent</code>, and <code>isError</code> fields in JavaScript before returning anything to the model. Separate tests cover text-only MCP results, structured MCP results, MCP image blocks passed through <code>image()</code>, error results summarized into booleans, and <code>code_mode_only</code> calling MCP tools even when only <code>exec</code> and <code>wait</code> were visible at the top level.</p>
+<p>Code Mode can inspect MCP <code>content</code>, <code>structuredContent</code>, and <code>isError</code> before returning anything. The tests cover text-only results, structured results, image blocks passed through <code>image()</code>, error summaries, and <code>code_mode_only</code> calling MCP tools when only <code>exec</code> and <code>wait</code> were visible at the top level.</p>
 
 <div class="sep">&middot;&middot;&middot;</div>
 
