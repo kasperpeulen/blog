@@ -285,6 +285,35 @@ grep -c <span class="s">"ERROR"</span> server.log
 <span class="c">// text(...) is the final payload the model gets from this exec call.</span>
 <span class="f">text</span>(tests.output);</pre>
 
+<h2><span>The TypeScript side</span>Declarations, not <code>tsc</code></h2>
+
+<p>There are two different layers here. The prompt surface can be TypeScript-shaped: in <code>code_mode_only</code>, Codex renders known nested tool schemas as TypeScript declarations in the <code>exec</code> description so the model knows how to call <code>tools.*</code>. The runtime surface is JavaScript-only: <code>exec</code> accepts raw JavaScript, strips only the optional <code>// @exec:</code> pragma, and sends the remaining source to V8 as a module.</p>
+
+<pre data-lang="TypeScript"><span class="c">// Generated into the exec description before the model writes JS.</span>
+<span class="k">declare</span> <span class="k">const</span> tools: {
+  <span class="f">mcp__rmcp__echo</span>(args: { env_var?: string; message: string; }):
+    Promise&lt;CallToolResult&lt;{ echo: string; env: string | null; }&gt;&gt;;
+};
+
+<span class="c">// The agent then writes ordinary JavaScript for V8 to run.</span>
+<span class="k">const</span> result = <span class="k">await</span> tools.<span class="f">mcp__rmcp__echo</span>({ message: <span class="s">"ping"</span> });
+<span class="f">text</span>(result.structuredContent?.echo ?? <span class="s">"missing"</span>);</pre>
+
+<p>I did not find a TypeScript compiler, transpiler, or <code>tsc</code> validation step in the Code Mode execution path. That matters. The generated <code>declare const tools</code> block is a prompt/type hint, not code that runs. If the model sends TypeScript-only syntax to <code>exec</code>, V8 sees it as JavaScript source and the cell fails at runtime. Tool argument errors are runtime tool errors, not static type errors.</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>Claim</th><th>Where I found it</th><th>What the source says</th></tr></thead>
+<tbody>
+<tr><td>Code Mode asks for raw JavaScript.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/description.rs#L12-L18">description.rs</a></td><td>The <code>exec</code> description says fresh V8 isolate, raw JavaScript, no Node, no filesystem, no network, no code fences.</td></tr>
+<tr><td>Tool types are generated declarations.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/description.rs#L371-L443">description.rs</a></td><td><code>render_code_mode_sample</code> appends an <code>exec tool declaration</code>; JSON Schema is rendered into TypeScript text.</td></tr>
+<tr><td>The model can see known nested tools before writing JS.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/tools/src/code_mode.rs#L61-L85">tools/src/code_mode.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/spec_plan.rs#L392-L425">spec_plan.rs</a></td><td>Codex collects enabled tool specs, excludes hidden/direct-model-only tools, and uses non-deferred tool definitions for the <code>code_mode_only</code> <code>exec</code> prompt.</td></tr>
+<tr><td>Execution does not run <code>tsc</code>.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/code_mode/execute_handler.rs#L36-L73">execute_handler.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/runtime/module_loader.rs#L9-L31">module_loader.rs</a></td><td>The handler parses raw source and passes <code>source</code> into the runtime; the runtime calls V8 <code>compile_module</code> directly.</td></tr>
+<tr><td><code>ALL_TOOLS</code> stores the same declaration text.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/tests/suite/code_mode.rs#L2623-L2699">code_mode.rs tests</a></td><td>Tests assert <code>view_image</code> and <code>mcp__rmcp__echo</code> metadata include exact <code>declare const tools</code> snippets.</td></tr>
+</tbody>
+</table>
+</div>
+
 <h2><span>Actual tests</span>The repo patterns are concrete</h2>
 
 <p>The best examples are not in docs. They are in <code>codex-rs/core/tests/suite/code_mode.rs</code>. They show the intended behavior much more clearly than my earlier sketches.</p>
@@ -353,22 +382,7 @@ wait {
 <span class="c">// Later exec call: load the state and explicitly return it.</span>
 <span class="f">text</span>(JSON.<span class="f">stringify</span>(<span class="f">load</span>(<span class="s">"nb"</span>)));</pre>
 
-<p><strong>5. The model normally knows the tool schema before it writes JavaScript.</strong> This is the correction I should have made earlier. <code>ALL_TOOLS</code> exists, and the tests use it to prove metadata and deferred-tool behavior, but the main path is not "search a hidden catalog and guess a call." Codex builds the <code>exec</code> description from enabled tool specs. In <code>code_mode_only</code>, that description includes nested tool declarations, so the model can write JavaScript against a known API.</p>
-
-<pre data-lang="TypeScript"><span class="c">// Shape rendered into the exec description before the model writes JS.</span>
-<span class="c">// This example is from the RMCP echo test's generated declaration.</span>
-<span class="k">declare</span> <span class="k">const</span> tools: {
-  <span class="f">mcp__rmcp__echo</span>(args: { env_var?: string; message: string; }):
-    Promise&lt;CallToolResult&lt;{ echo: string; env: string | null; }&gt;&gt;;
-};
-
-<span class="c">// The agent writes the call directly from that known schema.</span>
-<span class="k">const</span> result = <span class="k">await</span> tools.<span class="f">mcp__rmcp__echo</span>({ message: <span class="s">"ping"</span> });
-
-<span class="c">// Then it returns only the useful part to the model.</span>
-<span class="f">text</span>(result.structuredContent?.echo ?? <span class="s">"missing"</span>);</pre>
-
-<p>The deferred-tool tests are still interesting, but they are an edge case: Codex can omit some deferred app or MCP tools from the printed <code>exec</code> description while keeping them callable and listed in <code>ALL_TOOLS</code>. That proves the runtime can handle dynamic catalogs. It does not mean normal agent code should discover every tool by string search at execution time.</p>
+<p><strong>5. Deferred tools are an edge case, not the main workflow.</strong> Codex can omit some deferred app or MCP tools from the printed <code>exec</code> description while keeping them callable and listed in <code>ALL_TOOLS</code>. That proves the runtime can handle dynamic catalogs. It does not mean normal agent code should discover every tool by string search at execution time.</p>
 
 <h2><span>MCP</span>How Code Mode connects to MCP</h2>
 
