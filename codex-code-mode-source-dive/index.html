@@ -358,43 +358,9 @@ wait {
 
 <p>The important bit is the result shape. Code Mode can inspect MCP <code>content</code>, <code>structuredContent</code>, and <code>isError</code> fields in JavaScript before returning anything to the model. Separate tests cover text-only MCP results, structured MCP results, MCP image blocks passed through <code>image()</code>, and <code>code_mode_only</code> calling MCP tools even when only <code>exec</code> and <code>wait</code> were visible at the top level.</p>
 
-<h2><span>Repo secrets</span>What surprised me</h2>
-
-<p><strong>First:</strong> <code>exec</code> is a freeform tool. The grammar accepts raw JavaScript, with an optional first-line <code>// @exec:</code> pragma for yield and output budgets. That is very different from a normal JSON-schema tool call.</p>
-
-<p><strong>Second:</strong> cells can yield and be resumed. The runtime has <code>yield_control()</code>, a <code>wait</code> tool, default yield windows, termination handling, and stored values. This is not just <code>eval</code>. It is a little session runtime.</p>
-
-<p><strong>Third:</strong> latest main is hardening behavior, not just sketching it. Comparing <code>rust-v0.134.0</code> with the inspected main commit touched Code Mode paths across 15 files, with new or expanded tests for parallel nested calls, <code>ALL_TOOLS</code>, MCP result shapes, images, hidden tools, <code>store</code>/<code>load</code>, and wait behavior.</p>
-
-<p><strong>Fourth:</strong> Code Mode Only does not mean "only two capabilities." It means "only two top-level tools in the prompt." The JavaScript runtime can still call nested tools that Codex registered for Code Mode.</p>
-
-<h2><span>The caution</span>This is not a stable user feature yet</h2>
-
-<p>The repo marks both flags as <code>UnderDevelopment</code>. OpenAI's feature maturity docs say under-development features are not ready for use. So the right posture is curiosity, not dependency.</p>
-
-<pre data-lang="Shell"><span class="c"># Local lab only</span>
-codex --enable code_mode
-codex --enable code_mode_only
-
-<span class="c"># Evidence on this machine</span>
-codex features list | rg <span class="s">'^code_mode'</span></pre>
-
-<p>The safest experiment is read-only: ask Codex to inspect <code>ALL_TOOLS</code>, call harmless local commands, and return tiny summaries. I would not build durable workflows on this until OpenAI promotes the feature to experimental or stable in public docs.</p>
-
-<h2><span>The bigger picture</span>Clients will catch up</h2>
-
-<p>The source dive made the public trend clearer. Anthropic is talking about code execution around MCP. Cloudflare shipped Code Mode for enormous APIs. FastMCP can wrap existing MCP servers in a Code Mode transform. OpenAI's open-source harness has a V8-based version hiding behind flags.</p>
-
-<p>The direction is not "agents need more buttons." It is "agents need a safe place to write small programs." Bash is one answer. Bun is another. Codex Code Mode is the constrained V8-isolate version: the runtime cannot touch the world directly, but it can ask approved Codex tools to do it.</p>
-
-<blockquote>
-  The future agent client may look less like a tool picker and more like a tiny JavaScript runtime with permissions.
-  <span class="at">&mdash; That is the bet I see in the repo</span>
-</blockquote>
-
 <div class="sep">&middot;&middot;&middot;</div>
 
-<p class="end-note">Sources: local inspection of <a href="https://github.com/openai/codex">openai/codex</a> at commit <a href="https://github.com/openai/codex/commit/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc">cca1e0b</a>, especially <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/description.rs">description.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/runtime/globals.rs">runtime/globals.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/runtime/callbacks.rs">runtime/callbacks.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/service.rs">service.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/code_mode/execute_handler.rs">execute_handler.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/code_mode/wait_handler.rs">wait_handler.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/tools/src/code_mode.rs">tools/src/code_mode.rs</a>, and <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/tests/suite/code_mode.rs">core/tests/suite/code_mode.rs</a>; OpenAI's <a href="https://developers.openai.com/codex/feature-maturity">Codex feature maturity docs</a>; Anthropic's <a href="https://www.anthropic.com/engineering/code-execution-with-mcp">"Code execution with MCP"</a>; Cloudflare's <a href="https://blog.cloudflare.com/code-mode-mcp/">Code Mode MCP post</a>; <a href="https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/#code-mode">Cloudflare MCP portal docs</a>; <a href="https://gofastmcp.com/servers/transforms/code-mode">FastMCP Code Mode transform</a>; and my earlier post, <a href="https://kasperpeulen.github.io/bun-is-the-new-shell/">"Will Bun Become the New Shell?"</a>.</p>
+<p class="end-note">Sources: local inspection of <a href="https://github.com/openai/codex">openai/codex</a> at commit <a href="https://github.com/openai/codex/commit/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc">cca1e0b</a>, especially <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/description.rs">description.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/runtime/globals.rs">runtime/globals.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/runtime/callbacks.rs">runtime/callbacks.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/service.rs">service.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/code_mode/execute_handler.rs">execute_handler.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/code_mode/wait_handler.rs">wait_handler.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/tools/src/code_mode.rs">tools/src/code_mode.rs</a>, and <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/tests/suite/code_mode.rs">core/tests/suite/code_mode.rs</a>; Anthropic's <a href="https://www.anthropic.com/engineering/code-execution-with-mcp">"Code execution with MCP"</a>; Cloudflare's <a href="https://blog.cloudflare.com/code-mode-mcp/">Code Mode MCP post</a>; <a href="https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/#code-mode">Cloudflare MCP portal docs</a>; <a href="https://gofastmcp.com/servers/transforms/code-mode">FastMCP Code Mode transform</a>; and my earlier post, <a href="https://kasperpeulen.github.io/bun-is-the-new-shell/">"Will Bun Become the New Shell?"</a>.</p>
 
 </div>
 
