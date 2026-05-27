@@ -195,10 +195,9 @@
 
 <div class="ct">
 
-<pre data-lang="Code Mode"><span class="c">// Shell</span>
-grep -c <span class="s">"ERROR"</span> server.log
+<pre data-lang="Shell">grep -c <span class="s">"ERROR"</span> server.log</pre>
 
-<span class="c">// Codex Code Mode: exec receives raw JavaScript</span>
+<pre data-lang="Code Mode"><span class="c">// exec receives raw JavaScript inside a V8 isolate.</span>
 <span class="k">const</span> { output } = <span class="k">await</span> tools.<span class="f">exec_command</span>({
   cmd: <span class="s">"cat server.log"</span>,
 });
