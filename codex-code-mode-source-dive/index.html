@@ -261,7 +261,7 @@ wait arguments:
 <thead><tr><th>Global</th><th>What it does</th><th>Pattern in tests</th></tr></thead>
 <tbody>
 <tr><td><code>tools</code></td><td>Object of async functions, one per nested Codex tool. Calling one emits a runtime tool-call event; the turn worker runs the real tool and resolves the Promise.</td><td><code>tools.exec_command</code>, <code>tools.apply_patch</code>, <code>tools.mcp__rmcp__echo</code></td></tr>
-<tr><td><code>ALL_TOOLS</code></td><td>Array of <code>{ name, description }</code>. Descriptions include generated TypeScript declarations for calling tools from <code>exec</code>.</td><td>Find deferred app tools or inspect <code>view_image</code> metadata.</td></tr>
+<tr><td><code>ALL_TOOLS</code></td><td>Runtime catalog of enabled nested tools as <code>{ name, description }</code>. The descriptions include the same generated TypeScript declarations Codex can show the model before it writes JavaScript.</td><td>Useful for metadata checks and deferred-tool edge cases, not the normal way to call a known tool.</td></tr>
 <tr><td><code>text</code></td><td>Adds an <code>input_text</code> item to the cell's buffered return value. When <code>exec</code> or <code>wait</code> responds, Codex wraps that buffer as <code>custom_tool_call_output</code>. That is what the model reads as the Code Mode tool result. It is not stdout and not a direct assistant message.</td><td><code>text({ json: true })</code> gives the agent model-visible tool output: <code>{"json":true}</code>.</td></tr>
 <tr><td><code>image</code></td><td>Appends image output from HTTP(S), data URLs, objects with <code>image_url</code>, or raw MCP image blocks.</td><td>Forward <code>view_image</code> and MCP image results.</td></tr>
 <tr><td><code>store/load</code></td><td>Store serializable JSON values under string keys and load them in later <code>exec</code> calls in the same session.</td><td>Store <code>{ title: "Notebook", items: [1, true, null] }</code>, load it next turn.</td></tr>
@@ -349,22 +349,22 @@ wait {
 <span class="c">// Later exec call: load the state and explicitly return it.</span>
 <span class="f">text</span>(JSON.<span class="f">stringify</span>(<span class="f">load</span>(<span class="s">"nb"</span>)));</pre>
 
-<p><strong>5. Deferred tools are discoverable, but not printed.</strong> One test mounts an app tool named <code>calendar_timezone_option_99</code> with deferred loading. The <code>exec</code> description tells the model to search <code>ALL_TOOLS</code>, but deliberately does not include that tool by name. The script still finds and calls it.</p>
+<p><strong>5. The model normally knows the tool schema before it writes JavaScript.</strong> This is the correction I should have made earlier. <code>ALL_TOOLS</code> exists, and the tests use it to prove metadata and deferred-tool behavior, but the main path is not "search a hidden catalog and guess a call." Codex builds the <code>exec</code> description from enabled tool specs. In <code>code_mode_only</code>, that description includes nested tool declarations, so the model can write JavaScript against a known API.</p>
 
-<pre data-lang="TypeScript"><span class="c">// From code_mode_only_guides_all_tools_search_and_calls_deferred_app_tools</span>
-<span class="c">// Search the hidden tool catalog from inside JavaScript.</span>
-<span class="k">const</span> tool = ALL_TOOLS.<span class="f">find</span>(
-  ({ name }) =&gt; name === <span class="s">"mcp__codex_apps__calendar_timezone_option_99"</span>
-);
+<pre data-lang="TypeScript"><span class="c">// Shape rendered into the exec description before the model writes JS.</span>
+<span class="c">// This example is from the RMCP echo test's generated declaration.</span>
+<span class="k">declare</span> <span class="k">const</span> tools: {
+  <span class="f">mcp__rmcp__echo</span>(args: { env_var?: string; message: string; }):
+    Promise&lt;CallToolResult&lt;{ echo: string; env: string | null; }&gt;&gt;;
+};
 
-<span class="c">// Call by dynamic property name because the tool was discovered at runtime.</span>
-<span class="k">const</span> result = <span class="k">await</span> tools[tool.name]({ timezone: <span class="s">"UTC"</span> });
+<span class="c">// The agent writes the call directly from that known schema.</span>
+<span class="k">const</span> result = <span class="k">await</span> tools.<span class="f">mcp__rmcp__echo</span>({ message: <span class="s">"ping"</span> });
 
-<span class="c">// Return a small, shaped summary instead of the whole tool payload.</span>
-<span class="f">text</span>(JSON.<span class="f">stringify</span>({
-  isError: Boolean(result.isError),
-  text: result.content?.[<span class="n">0</span>]?.text ?? <span class="s">""</span>,
-}));</pre>
+<span class="c">// Then it returns only the useful part to the model.</span>
+<span class="f">text</span>(result.structuredContent?.echo ?? <span class="s">"missing"</span>);</pre>
+
+<p>The deferred-tool tests are still interesting, but they are an edge case: Codex can omit some deferred app or MCP tools from the printed <code>exec</code> description while keeping them callable and listed in <code>ALL_TOOLS</code>. That proves the runtime can handle dynamic catalogs. It does not mean normal agent code should discover every tool by string search at execution time.</p>
 
 <h2><span>MCP</span>How Code Mode connects to MCP</h2>
 
