@@ -246,21 +246,40 @@ wait arguments:
 
 <p>The sandbox is small on purpose. The runtime deletes <code>console</code>, <code>Atomics</code>, <code>SharedArrayBuffer</code>, and <code>WebAssembly</code>. Module imports are unsupported. There is no Node, no direct filesystem, and no direct network. If the script wants power, it has to ask a Codex tool for it. I did not find a startup benchmark in the repo, so I would not claim V8 is faster than Bun here. The architectural fact is narrower and stronger: this is in-process isolate startup, not a spawned shell process.</p>
 
+<p>The important practical detail is the return channel. A Code Mode script can call tools, branch, filter, and keep intermediate results private inside V8. The model does not automatically see all of that. The model sees what the script gives back through <code>text()</code> or <code>image()</code> when <code>exec</code> or <code>wait</code> yields or completes. In other words, <code>text()</code> is closer to "return this to the agent" than "print this to the user."</p>
+
+<pre data-lang="TypeScript"><span class="c">// Awaiting the shell tool gives the output to JavaScript, not to the model.</span>
+<span class="k">const</span> status = <span class="k">await</span> tools.<span class="f">exec_command</span>({ cmd: <span class="s">"git status --short"</span> });
+
+<span class="c">// text(...) is the return channel back to the agent/model.</span>
+<span class="f">text</span>(status.output);
+
+<span class="c">// Without text(...) or image(...), the agent gets no useful final payload.</span></pre>
+
 <div class="tbl-wrap">
 <table>
 <thead><tr><th>Global</th><th>What it does</th><th>Pattern in tests</th></tr></thead>
 <tbody>
 <tr><td><code>tools</code></td><td>Object of async functions, one per nested Codex tool. Calling one emits a runtime tool-call event; the turn worker runs the real tool and resolves the Promise.</td><td><code>tools.exec_command</code>, <code>tools.apply_patch</code>, <code>tools.mcp__rmcp__echo</code></td></tr>
 <tr><td><code>ALL_TOOLS</code></td><td>Array of <code>{ name, description }</code>. Descriptions include generated TypeScript declarations for calling tools from <code>exec</code>.</td><td>Find deferred app tools or inspect <code>view_image</code> metadata.</td></tr>
-<tr><td><code>text</code></td><td>Adds an <code>input_text</code> content item to the current cell's buffered result. When <code>exec</code> or <code>wait</code> yields or completes, Codex wraps that buffer as <code>custom_tool_call_output</code> and sends it back to the model as the tool result. It is not stdout and not a direct assistant message.</td><td><code>text({ json: true })</code> becomes model-visible tool output <code>{"json":true}</code>.</td></tr>
+<tr><td><code>text</code></td><td>Adds an <code>input_text</code> item to the cell's buffered return value. When <code>exec</code> or <code>wait</code> responds, Codex wraps that buffer as <code>custom_tool_call_output</code>. That is what the model reads as the Code Mode tool result. It is not stdout and not a direct assistant message.</td><td><code>text({ json: true })</code> gives the agent model-visible tool output: <code>{"json":true}</code>.</td></tr>
 <tr><td><code>image</code></td><td>Appends image output from HTTP(S), data URLs, objects with <code>image_url</code>, or raw MCP image blocks.</td><td>Forward <code>view_image</code> and MCP image results.</td></tr>
 <tr><td><code>store/load</code></td><td>Store serializable JSON values under string keys and load them in later <code>exec</code> calls in the same session.</td><td>Store <code>{ title: "Notebook", items: [1, true, null] }</code>, load it next turn.</td></tr>
-<tr><td><code>notify</code></td><td>Stringifies a non-empty value like <code>text()</code>, but skips the cell buffer. The host immediately injects a separate <code>custom_tool_call_output</code> for the active <code>exec</code> call while the JavaScript keeps running.</td><td>The test emits <code>notify("code_mode_notify_marker")</code>, then awaits another tool, then later emits <code>text("done")</code>.</td></tr>
+<tr><td><code>notify</code></td><td>Sends a model-visible update immediately, before the final <code>exec</code> result. It stringifies like <code>text()</code>, but skips the cell buffer and injects a separate <code>custom_tool_call_output</code> while JavaScript keeps running.</td><td>The test emits <code>notify("code_mode_notify_marker")</code>, awaits another tool, then later emits <code>text("done")</code>.</td></tr>
 <tr><td><code>yield_control</code></td><td>Yields accumulated output now while the script keeps running.</td><td>Emit "phase 1", later resume with <code>wait</code>.</td></tr>
 <tr><td><code>exit</code></td><td>Stops the script successfully, like an early top-level return.</td><td><code>text("before"); exit(); text("after")</code> only emits "before".</td></tr>
 </tbody>
 </table>
 </div>
+
+<pre data-lang="TypeScript"><span class="c">// notify(...) is for an early update to the model.</span>
+<span class="f">notify</span>(<span class="s">"Starting tests now"</span>);
+
+<span class="c">// The script can keep doing real work after the notification.</span>
+<span class="k">const</span> tests = <span class="k">await</span> tools.<span class="f">exec_command</span>({ cmd: <span class="s">"pnpm test"</span> });
+
+<span class="c">// text(...) is the final payload the model gets from this exec call.</span>
+<span class="f">text</span>(tests.output);</pre>
 
 <h2><span>Actual tests</span>The repo patterns are concrete</h2>
 
@@ -269,9 +288,12 @@ wait arguments:
 <p><strong>1. Nested tools are normal async functions.</strong> Even in <code>code_mode_only</code>, where the top-level model prompt only lists <code>exec</code> and <code>wait</code>, JavaScript can still call registered nested tools.</p>
 
 <pre data-lang="TypeScript"><span class="c">// From code_mode_only_can_call_nested_tools</span>
+<span class="c">// Call an ordinary Codex tool from inside the V8 cell.</span>
 <span class="k">const</span> output = <span class="k">await</span> tools.<span class="f">exec_command</span>({
   cmd: <span class="s">"printf code_mode_only_nested_tool_marker"</span>
 });
+
+<span class="c">// Return only the useful command output to the agent.</span>
 <span class="f">text</span>(output.output);</pre>
 
 <p>That is the shell replacement shape in miniature. The agent writes JavaScript; the shell command is demoted to one tool call inside the script.</p>
@@ -281,23 +303,32 @@ wait arguments:
 <pre data-lang="TypeScript"><span class="c">// From code_mode_nested_tool_calls_can_run_in_parallel</span>
 <span class="k">const</span> args = {
   sleep_after_ms: <span class="n">300</span>,
-  barrier: { id: <span class="s">"code-mode-parallel-tools"</span>, participants: <span class="n">2</span>, timeout_ms: <span class="n">1000</span> },
+  barrier: {
+    id: <span class="s">"code-mode-parallel-tools"</span>,
+    participants: <span class="n">2</span>,
+    timeout_ms: <span class="n">1000</span>,
+  },
 };
 
+<span class="c">// Start both nested tool calls at the same time.</span>
 <span class="k">const</span> results = <span class="k">await</span> Promise.<span class="f">all</span>([
   tools.<span class="f">test_sync_tool</span>(args),
   tools.<span class="f">test_sync_tool</span>(args),
 ]);
 
+<span class="c">// Send the combined result back as one exec output.</span>
 <span class="f">text</span>(JSON.<span class="f">stringify</span>(results));</pre>
 
 <p><strong>3. Long-running cells yield and resume.</strong> <code>exec</code> can return before the JavaScript finishes. The model gets a cell id, then calls <code>wait</code> later. The test verifies that the first response includes "phase 1", the second wait returns only "phase 2", and the final wait returns "phase 3" with <code>Script completed</code>.</p>
 
 <pre data-lang="TypeScript"><span class="c">// From code_mode_can_yield_and_resume_with_wait</span>
+<span class="c">// Emit phase 1 as tool output now.</span>
 <span class="f">text</span>(<span class="s">"phase 1"</span>);
+
+<span class="c">// Return control to the model while the JS cell stays alive.</span>
 <span class="f">yield_control</span>();
 
-<span class="c">// The cell is still alive here. A later wait call resumes it.</span>
+<span class="c">// Later wait calls receive only output emitted after the yield.</span>
 <span class="f">text</span>(<span class="s">"phase 2"</span>);
 <span class="f">text</span>(<span class="s">"phase 3"</span>);</pre>
 
@@ -309,21 +340,27 @@ wait {
 
 <p><strong>4. Small state can cross turns.</strong> This is not a durable database. It is session-local JSON state. But it is enough for an agent to save a small object from one <code>exec</code> cell and reuse it in a later one.</p>
 
-<pre data-lang="TypeScript"><span class="c">// First exec call</span>
+<pre data-lang="TypeScript"><span class="c">// First exec call: keep JSON state inside Code Mode's session store.</span>
 <span class="f">store</span>(<span class="s">"nb"</span>, { title: <span class="s">"Notebook"</span>, items: [<span class="n">1</span>, <span class="k">true</span>, <span class="n">null</span>] });
+
+<span class="c">// Return a tiny acknowledgement to the model.</span>
 <span class="f">text</span>(<span class="s">"stored"</span>);
 
-<span class="c">// Later exec call in the same session</span>
+<span class="c">// Later exec call: load the state and explicitly return it.</span>
 <span class="f">text</span>(JSON.<span class="f">stringify</span>(<span class="f">load</span>(<span class="s">"nb"</span>)));</pre>
 
 <p><strong>5. Deferred tools are discoverable, but not printed.</strong> One test mounts an app tool named <code>calendar_timezone_option_99</code> with deferred loading. The <code>exec</code> description tells the model to search <code>ALL_TOOLS</code>, but deliberately does not include that tool by name. The script still finds and calls it.</p>
 
 <pre data-lang="TypeScript"><span class="c">// From code_mode_only_guides_all_tools_search_and_calls_deferred_app_tools</span>
+<span class="c">// Search the hidden tool catalog from inside JavaScript.</span>
 <span class="k">const</span> tool = ALL_TOOLS.<span class="f">find</span>(
   ({ name }) =&gt; name === <span class="s">"mcp__codex_apps__calendar_timezone_option_99"</span>
 );
 
+<span class="c">// Call by dynamic property name because the tool was discovered at runtime.</span>
 <span class="k">const</span> result = <span class="k">await</span> tools[tool.name]({ timezone: <span class="s">"UTC"</span> });
+
+<span class="c">// Return a small, shaped summary instead of the whole tool payload.</span>
 <span class="f">text</span>(JSON.<span class="f">stringify</span>({
   isError: Boolean(result.isError),
   text: result.content?.[<span class="n">0</span>]?.text ?? <span class="s">""</span>,
@@ -347,9 +384,11 @@ wait {
 </div>
 
 <pre data-lang="TypeScript"><span class="c">// From code_mode_can_print_structured_mcp_tool_result_fields</span>
+<span class="c">// Call the real MCP tool as a nested JavaScript function.</span>
 <span class="k">const</span> { content, structuredContent, isError } =
   <span class="k">await</span> tools.<span class="f">mcp__rmcp__echo</span>({ message: <span class="s">"ping"</span> });
 
+<span class="c">// Reduce the MCP result into a tiny model-visible summary.</span>
 <span class="f">text</span>(
   <span class="s">`echo=${structuredContent?.echo ?? "missing"}\n`</span> +
     <span class="s">`isError=${String(isError)}\n`</span> +
