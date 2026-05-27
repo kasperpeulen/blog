@@ -252,7 +252,7 @@
 
 <p>The runtime deletes <code>console</code>, <code>Atomics</code>, <code>SharedArrayBuffer</code>, and <code>WebAssembly</code>. Module imports are unsupported. There is no Node, no direct filesystem, and no direct network. If the script wants power, it has to ask a Codex tool for it.</p>
 
-<p>I did not find a startup benchmark in the repo, so I measured the path Code Mode actually uses: <code>CodeModeService::execute</code> in a release build, after warmup, against <code>bun -e</code> process startup. Same machine, Apple M1 Pro, macOS Darwin 24.6.0, Bun <code>1.3.11</code>, Codex <code>a75c443</code>, 1,000 iterations:</p>
+<p>The repo does not include a startup benchmark, so this measurement uses the path Code Mode actually runs: <code>CodeModeService::execute</code> in a release build, after warmup, against <code>bun -e</code> process startup. Same machine, Apple M1 Pro, macOS Darwin 24.6.0, Bun <code>1.3.11</code>, Codex <code>a75c443</code>, 1,000 iterations:</p>
 
 <div class="tbl-wrap">
 <table>
@@ -335,9 +335,9 @@
   last_lines: repro.output.<span class="f">split</span>(<span class="s">"\n"</span>).<span class="f">slice</span>(-<span class="n">20</span>),
 }, <span class="k">null</span>, <span class="n">2</span>));</pre>
 
-<h2><span>The TypeScript side</span>Declarations, not <code>tsc</code></h2>
+<h2><span>The TypeScript side</span>Types in the prompt, JavaScript in V8</h2>
 
-<p>The prompt can be TypeScript-shaped. In <code>code_mode_only</code>, Codex renders known nested tool schemas as TypeScript declarations in the <code>exec</code> description so the model knows how to call <code>tools.*</code>. The runtime is JavaScript-only: <code>exec</code> accepts raw JavaScript, strips only the optional <code>// @exec:</code> pragma, and sends the remaining source to V8 as a module.</p>
+<p>Code Mode uses TypeScript syntax as tool documentation for the model. In <code>code_mode_only</code>, Codex renders known nested tool schemas as TypeScript declarations inside the <code>exec</code> description. That gives the model the available <code>tools.*</code> names, argument shapes, and return shapes before it writes the cell.</p>
 
 <pre data-lang="TypeScript"><span class="c">// Generated into the exec description before the model writes JS.</span>
 <span class="k">declare</span> <span class="k">const</span> tools: {
@@ -345,11 +345,11 @@
     Promise&lt;CallToolResult&lt;{ echo: string; env: string | null; }&gt;&gt;;
 };
 
-<span class="c">// The agent then writes ordinary JavaScript for V8 to run.</span>
+<span class="c">// The cell itself is ordinary JavaScript.</span>
 <span class="k">const</span> result = <span class="k">await</span> tools.<span class="f">mcp__rmcp__echo</span>({ message: <span class="s">"ping"</span> });
 <span class="f">text</span>(result.structuredContent?.echo ?? <span class="s">"missing"</span>);</pre>
 
-<p>I did not find a TypeScript compiler, transpiler, or <code>tsc</code> validation step in the execution path. The generated <code>declare const tools</code> block is prompt text. If the model sends TypeScript-only syntax to <code>exec</code>, V8 rejects it at runtime. Tool argument errors are runtime tool errors, not static type errors.</p>
+<p>At execution time the declaration block is gone. <code>exec</code> receives raw source, strips only the optional <code>// @exec:</code> pragma, and gives the remaining JavaScript module directly to V8. TypeScript-only syntax is invalid there. Tool argument validation happens when JavaScript calls a nested tool, because that call sends ordinary JSON back through Codex's tool runtime.</p>
 
 <div class="tbl-wrap">
 <table>
@@ -358,7 +358,7 @@
 <tr><td>Code Mode asks for raw JavaScript.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/description.rs#L12-L18">description.rs</a></td><td>The <code>exec</code> description says fresh V8 isolate, raw JavaScript, no Node, no filesystem, no network, no code fences.</td></tr>
 <tr><td>Tool types are generated declarations.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/description.rs#L371-L443">description.rs</a></td><td><code>render_code_mode_sample</code> appends an <code>exec tool declaration</code>; JSON Schema is rendered into TypeScript text.</td></tr>
 <tr><td>The model can see known nested tools before writing JS.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/tools/src/code_mode.rs#L61-L85">tools/src/code_mode.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/spec_plan.rs#L392-L425">spec_plan.rs</a></td><td>Codex collects enabled tool specs, excludes hidden/direct-model-only tools, and uses non-deferred tool definitions for the <code>code_mode_only</code> <code>exec</code> prompt.</td></tr>
-<tr><td>Execution does not run <code>tsc</code>.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/code_mode/execute_handler.rs#L36-L73">execute_handler.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/runtime/module_loader.rs#L9-L31">module_loader.rs</a></td><td>The handler parses raw source and passes <code>source</code> into the runtime; the runtime calls V8 <code>compile_module</code> directly.</td></tr>
+<tr><td>Execution sends JavaScript directly to V8.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/src/tools/code_mode/execute_handler.rs#L36-L73">execute_handler.rs</a>, <a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/code-mode/src/runtime/module_loader.rs#L9-L31">module_loader.rs</a></td><td>The handler parses raw source and passes <code>source</code> into the runtime; the runtime calls V8 <code>compile_module</code> directly.</td></tr>
 <tr><td><code>ALL_TOOLS</code> stores the same declaration text.</td><td><a href="https://github.com/openai/codex/blob/cca1e0ba1d3ea925d297dcbaca2f77c658fcf1bc/codex-rs/core/tests/suite/code_mode.rs#L2623-L2699">code_mode.rs tests</a></td><td>Tests assert <code>view_image</code> and <code>mcp__rmcp__echo</code> metadata include exact <code>declare const tools</code> snippets.</td></tr>
 </tbody>
 </table>
